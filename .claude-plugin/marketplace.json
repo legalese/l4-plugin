@@ -1,0 +1,47 @@
+{
+  "name": "legalese",
+  "owner": {
+    "name": "Legalese",
+    "email": "hello@legalese.com"
+  },
+  "metadata": {
+    "description": "Official Legalese plugin marketplace for computational law tools",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "l4-computational-law",
+      "source": {
+        "source": "github",
+        "repo": "legalese/l4-plugin",
+        "path": "."
+      },
+      "description": "L4 programming language for computational law - encode contracts, regulations, and policies as executable, testable, verifiable programs",
+      "version": "0.2.0",
+      "author": {
+        "name": "Legalese",
+        "email": "hello@legalese.com"
+      },
+      "homepage": "https://github.com/legalese/l4-ide",
+      "repository": "https://github.com/legalese/l4-ide",
+      "license": "Apache-2.0",
+      "keywords": [
+        "legal",
+        "law",
+        "computational-law",
+        "contracts",
+        "regulations",
+        "formal-methods",
+        "verification",
+        "functional-programming"
+      ],
+      "category": "legal-tech",
+      "tags": [
+        "legal",
+        "computational-law",
+        "formal-verification",
+        "contracts"
+      ]
+    }
+  ]
+}

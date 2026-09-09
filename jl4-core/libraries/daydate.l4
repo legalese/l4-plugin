@@ -1,0 +1,779 @@
+§ `Day & Date Definitions and Helpers`
+
+-- Library with some basic functions to enable math with dates and days following ISO 8601
+-- Functions return datestamps (Number of days since 1st January 0000).
+-- A week begins on Monday
+-- Check the test/daydate.l4 file to see examples
+
+IMPORT `date-compat`
+
+
+§§ `Constants`
+
+
+`Months in a year`      MEANS 12
+`Days in a year`        MEANS 365.2425   -- Considering 4 year leap-cycle with 100 and 400 year exceptions
+`Days in a month`       MEANS 30.436875  -- Average month
+`Days in a week`        MEANS 7
+
+`Monday`     AKA `Mon`  MEANS 1
+`Tuesday`    AKA `Tue`  MEANS 2
+`Wednesday`  AKA `Wed`  MEANS 3
+`Thursday`   AKA `Thu`  MEANS 4
+`Friday`     AKA `Fri`  MEANS 5
+`Saturday`   AKA `Sat`  MEANS 6
+`Sunday`     AKA `Sun`  MEANS 0
+
+`January`    AKA `Jan`  MEANS 1
+`February`   AKA `Feb`  MEANS 2
+`March`      AKA `Mar`  MEANS 3
+`April`      AKA `Apr`  MEANS 4
+`May`                   MEANS 5
+`June`       AKA `Jun`  MEANS 6
+`July`       AKA `Jul`  MEANS 7
+`August`     AKA `Aug`  MEANS 8
+`September`  AKA `Sep`  MEANS 9
+`October`    AKA `Oct`  MEANS 10
+`November`   AKA `Nov`  MEANS 11
+`December`   AKA `Dec`  MEANS 12
+
+
+
+§§ `Type`
+
+
+§§ `Date Constructors`
+
+
+GIVEN day   IS A NUMBER
+      month IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`Date` AKA `Days to date` MEANS
+    DATE_FROM_SERIAL (jan1serial PLUS monthDays PLUS day MINUS 1)
+    WHERE
+        jan1serial MEANS DATE_SERIAL (DATE_FROM_DMY 1 1 year)
+        monthDays MEANS `Months since year start to days` month year
+
+GIVEN days  IS A NUMBER
+GIVETH A DATE
+`Date` AKA `Days to date` MEANS
+    DATE_FROM_SERIAL days
+
+GIVEN date  IS A DATE
+GIVETH A DATE
+`Date` AKA `Days to date` MEANS date
+
+-- Date str  -> parse date string (YYYY-MM-DD, etc.), ignores time/timezone if present
+GIVEN str IS A STRING
+GIVETH A MAYBE DATE
+`Date` AKA `Days to date` MEANS
+    CONSIDER DATEVALUE str
+    WHEN RIGHT d THEN JUST d
+    WHEN LEFT err THEN
+        CONSIDER TODATETIME str
+        WHEN JUST dt THEN JUST (DATETIME_DATE dt)
+        WHEN NOTHING THEN NOTHING
+
+-- Date dt  -> extract date from DATETIME (ignores time and timezone)
+GIVEN dt IS A DATETIME
+GIVETH A DATE
+`Date` AKA `Days to date` MEANS DATETIME_DATE dt
+
+-- YMD year month day  -> the date, in ISO 8601 argument order, with the
+-- arguments BOUNDS-CHECKED. This is the recommended constructor for new
+-- code, on two grounds:
+--
+--   * big-endian year-month-day reads the way ISO 8601 writes it, so a
+--     day/month transposition is harder to WRITE;
+--   * unlike `Date d m y`, YMD rejects out-of-range components instead of
+--     rolling them: `YMD 2026 28 7` (a transposition) and `YMD 2023 2 29`
+--     (no such leap day) stop evaluation loudly, where `Date` rolls forward
+--     silently. Since 2026-09-06 that stop is a `REFUSE`; the note below
+--     says why, and what the designed shape is.
+--
+-- The check is a component round-trip: build the candidate with `Date`,
+-- then require its year, month and day to equal the arguments. Any rolled
+-- component fails the comparison, so leap years are handled by the same
+-- arithmetic that builds the date and no calendar logic is duplicated.
+--
+-- The pair is deliberate: YMD is the STRICT constructor for literals;
+-- `Date d m y` is unchanged as the LENIENT, rolling constructor, which date
+-- arithmetic relies on (`Date 1 (month PLUS 6) year` is idiomatic). The
+-- rejected case is a deliberate REFUSE: evaluation that reaches it stops
+-- with the reason below, and no rule can turn it back into a date. Until
+-- 2026-09-06 it was an `ASSUME … IS A DATE` bottom, which displayed as its
+-- own name and only stopped evaluation when forced.
+--
+-- A `REFUSE`, DELIBERATELY, AND AS A STOPGAP. The taxonomy of
+-- PROPS-REDTEAM-2026-09-03 §2.8 classifies an out-of-range YMD as INVALID
+-- INPUT (the EITHER row), not as the model declining to answer. Its designed
+-- shape is therefore a change to this constructor's RETURN TYPE, which every
+-- date-arithmetic call site in the corpus goes through — a different and much
+-- larger change than swapping the bottom, and one that belongs in its own
+-- branch. Until that lands, `REFUSE` is the one construct that keeps the
+-- constructor loud without making its sentinel suppliable: the section-GIVEN
+-- spelling of the old ASSUME would have been an input, and discharge would
+-- have threaded it into every reader of `YMD`. Recorded in
+-- IMPLICIT-PROPS-DESIGN.md §11.1.2 and doc/reference/control-flow/REFUSE.md.
+--
+-- Not to be confused with the Reg CF corpus's commencement floor
+-- (`regcf.l4:143`), which is still an ASSUME as of 2026-09-07 for a different
+-- reason — a refusal reachable from a tier-2 BKM un-BKMs it in the DMN
+-- exporter (§11.1.2) — and whose own designed destination is a gate on the
+-- rule-version axis (R7.1, §11.9.2), not a refusal, once that gate exists.
+-- The definition below keeps the ordinary word "refused" in its name;
+-- renaming it would move goldens in other files and buys nothing.
+GIVETH A DATE
+`YMD refused an out-of-range month or day` MEANS
+    REFUSE "YMD refused an out-of-range month or day"
+
+GIVEN year  IS A NUMBER
+      month IS A NUMBER
+      day   IS A NUMBER
+GIVETH A DATE
+`YMD` AKA `Year month day` MEANS
+    IF      DATE_YEAR  candidate EQUALS year
+        AND DATE_MONTH candidate EQUALS month
+        AND DATE_DAY   candidate EQUALS day
+    THEN candidate
+    ELSE `YMD refused an out-of-range month or day`
+    WHERE
+        candidate MEANS Date day month year
+
+
+
+§§ `Datestamp Constructors`
+
+
+GIVEN date  IS A DATE
+GIVETH A NUMBER
+`Day` AKA `Date to days` MEANS
+    DATE_SERIAL date
+
+GIVEN day   IS A NUMBER
+      month IS A NUMBER
+      year  IS A NUMBER
+GIVETH A NUMBER
+`Day` AKA `Date to days` MEANS
+    DATE_SERIAL (Date day month year)
+
+GIVEN days  IS A NUMBER
+GIVETH A NUMBER
+`Day` AKA `Date to days` MEANS
+    days
+
+GIVEN year  IS A NUMBER
+GIVETH A DATE
+`Year` MEANS
+    Month 1 year
+
+GIVEN date  IS A DATE
+GIVETH A DATE
+`Year` MEANS
+    Year (DATE_YEAR date)
+
+GIVEN month IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`Month` MEANS
+    Date (Day 1 month year)
+            
+GIVEN days  IS A NUMBER
+GIVETH A DATE
+`Month` MEANS
+    Month (Date days)
+
+GIVEN date  IS A DATE
+GIVETH A DATE
+`Month` MEANS
+    Month (DATE_MONTH date) (DATE_YEAR date)
+
+GIVEN week  IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`Week` MEANS
+    Year year
+        PLUS (3 MINUS `Days in a week`) MINUS o
+            PLUS (w TIMES `Days in a week`)
+    WHERE
+        w MEANS FLOOR week
+        o MEANS (`Days in a week` PLUS 2
+            PLUS (`Weekday of 1st day of year` year))
+                MODULO `Days in a week`
+
+GIVEN days  IS A NUMBER
+GIVETH A DATE
+`Week` MEANS
+    IF   w EQUALS 0
+    THEN Date (days MINUS (`Days in a week` MINUS 1))
+    ELSE Date (days MINUS w PLUS 1)
+    WHERE
+        w MEANS `Weekday of` days
+
+GIVEN date  IS A DATE
+GIVETH A DATE
+`Week` MEANS
+    Week (Day date)
+
+
+
+§§ `Month Helpers`
+-- Convenience functions for months so you can write: January 1 1972
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`January` AKA `Jan` MEANS
+    Date day 1 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`February` AKA `Feb` MEANS
+    Date day 2 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`March` AKA `Mar` MEANS
+    Date day 3 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`April` AKA `Apr` MEANS
+    Date day 4 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`May` MEANS
+    Date day 5 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`June` AKA `Jun` MEANS
+    Date day 6 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`July` AKA `Jul` MEANS
+    Date day 7 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`August` AKA `Aug` MEANS
+    Date day 8 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`September` AKA `Sep` MEANS
+    Date day 9 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`October` AKA `Oct` MEANS
+    Date day 10 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`November` AKA `Nov` MEANS
+    Date day 11 year
+
+GIVEN day   IS A NUMBER
+      year  IS A NUMBER
+GIVETH A DATE
+`December` AKA `Dec` MEANS
+    Date day 12 year
+
+
+GIVEN days  IS A NUMBER
+GIVETH A NUMBER
+`Month of the year` MEANS 
+    `Month of the year` (Date days)
+
+GIVEN date  IS A DATE
+GIVETH A NUMBER
+`Month of the year` MEANS                     -- Returns the number of the week of this date
+    `Month of days` 1 (`Months since year start to days` (DATE_MONTH date PLUS 1) (DATE_YEAR date))
+    WHERE
+        GIVEN i IS A NUMBER
+              c IS A NUMBER
+        `Month of days` MEANS
+            IF    i LESS THAN `Months in a year` AND a LESS THAN c
+            THEN  `Month of days` (i PLUS 1) c
+            ELSE  i
+            WHERE
+                a MEANS `Months since year start to days` (i PLUS 1) (DATE_YEAR date)
+
+
+
+
+§§ `Datestamp Math Helpers`
+
+
+GIVEN month IS A NUMBER
+      year  IS A NUMBER
+GIVETH A NUMBER
+`Months since year start to days` MEANS
+    IF    m LESS THAN 1
+    THEN  0
+    ELSE  `Days in month` m year
+              PLUS `Months since year start to days` m year -- Recursively add all days of months that year
+    WHERE
+        m MEANS FLOOR month MINUS 1
+
+GIVEN days  IS A NUMBER
+GIVETH A NUMBER
+`Months since year start to days` MEANS
+    `Months since year start to days` (Date days)
+
+GIVEN date  IS A DATE
+GIVETH A NUMBER
+`Months since year start to days` MEANS
+    `Months since year start to days` (DATE_MONTH date) (DATE_YEAR date)
+
+GIVEN month IS A NUMBER
+      year  IS A NUMBER
+GIVETH A NUMBER
+`Days in month` MEANS
+    IF       m EQUALS 4   -- April
+          OR m EQUALS 6   -- June
+          OR m EQUALS 9   -- September
+          OR m EQUALS 11  -- November
+    THEN  30
+    ELSE  IF    m EQUALS 2
+          THEN  IF    `is leap year` y
+                THEN  29
+                ELSE  28
+          ELSE  31
+    WHERE
+        m MEANS 1 PLUS (FLOOR month MINUS 1)
+                    MINUS (FLOOR ((month MINUS 1)
+                        DIVIDED BY `Months in a year`))
+                            TIMES `Months in a year`
+        y MEANS FLOOR year
+                    PLUS FLOOR (month DIVIDED BY `Months in a year`)
+
+GIVEN days  IS A NUMBER
+GIVETH A NUMBER
+`Days in month` MEANS
+    `Days in month` (Date days)
+
+GIVEN date  IS A DATE
+GIVETH A NUMBER
+`Days in month` MEANS
+    `Days in month` (DATE_MONTH date) (DATE_YEAR date)
+
+GIVEN year  IS A NUMBER
+GIVETH A NUMBER
+`Days in year` MEANS
+    IF   `is leap year` year
+    THEN 366
+    ELSE 365
+
+GIVEN date  IS A DATE
+GIVETH A NUMBER
+`Days in year` MEANS
+    `Days in year` (DATE_YEAR date)
+
+GIVEN year  IS A NUMBER
+GIVETH A NUMBER
+`Years to days` MEANS
+    (year TIMES 365)
+        PLUS  FLOOR (y DIVIDED BY 4)   -- consider leap years
+        MINUS FLOOR (y DIVIDED BY 100)
+        PLUS  FLOOR (y DIVIDED BY 400)
+    WHERE
+        y MEANS FLOOR (year MINUS 1)
+
+GIVEN date  IS A DATE
+GIVETH A NUMBER
+`Years to days` MEANS
+    `Years to days` (DATE_YEAR date)
+
+
+
+§§ `Calendar Arithmetic`
+
+
+-- Add a whole number of months or years to a date, CLAMPING the day to the last
+-- day of the target month when the original day does not exist there. 31 January
+-- plus one month is 29 February in a leap year and 28 February otherwise; the
+-- first anniversary of 29 February 2024 is 28 February 2025.
+--
+-- The clamp is not one convention picked from several. It is what Excel's EDATE
+-- does, what `actus-schedule` already did for schedule generation, and -- MEASURED
+-- on 2026-08-05 against Drools/KIE 8.44.0.Final and Camunda 8.7.6 (zeebe-dmn) --
+-- what FEEL's `date + duration("P1Y")` does on both DMN engines, over months and
+-- years alike, in all six probed cases. Agreeing with all three is the point: it
+-- is what lets an L4 module that computes an anniversary export to DMN and get
+-- the same answer back from an engine we do not control.
+--
+-- Contrast `Date d m y`, which is LENIENT and ROLLS FORWARD: `Date 29 2 2025` is
+-- 1 March 2025, not 28 February. Rolling is right for component arithmetic of the
+-- `Date 1 (month PLUS 6) year` kind and wrong for an anniversary, and the two
+-- differ by exactly one day on precisely the dates anybody litigates. Note that
+-- FEEL has no rolling form at all: `date(2025, 2, 29)` evaluates to null on both
+-- engines, so an anniversary written by reconstructing components cannot be
+-- exported at all, whereas one written here can.
+
+GIVEN date   IS A DATE
+      months IS A NUMBER
+GIVETH A DATE
+`add months` MEANS
+    DATE_FROM_DMY clampedDay newMonth newYear
+    WHERE
+        totalMonths MEANS DATE_MONTH date PLUS FLOOR months
+        newYear     MEANS DATE_YEAR date
+                              PLUS FLOOR ((totalMonths MINUS 1) DIVIDED BY `Months in a year`)
+        newMonth    MEANS ((totalMonths MINUS 1) MODULO `Months in a year`) PLUS 1
+        lastDay     MEANS `Days in month` newMonth newYear
+        clampedDay  MEANS IF   DATE_DAY date GREATER THAN lastDay
+                          THEN lastDay
+                          ELSE DATE_DAY date
+
+GIVEN date  IS A DATE
+      years IS A NUMBER
+GIVETH A DATE
+`add years` MEANS
+    `add months` date (FLOOR years TIMES `Months in a year`)
+
+
+
+§§ `Weekday Functions`
+
+
+GIVEN days  IS A NUMBER
+GIVETH A NUMBER
+`Weekday of` MEANS
+    days MODULO `Days in a week`
+
+GIVEN date  IS A DATE
+GIVETH A NUMBER
+`Weekday of` MEANS
+    `Weekday of` (Day date)
+
+GIVEN month  IS A NUMBER
+      year   IS A NUMBER
+GIVETH A NUMBER
+`Weekday of 1st day of month` MEANS
+    `Weekday of`
+        (Day 1 month year)
+
+GIVEN days   IS A NUMBER
+GIVETH A NUMBER
+`Weekday of 1st day of month` MEANS
+    `Weekday of 1st day of month` (Date days)
+
+GIVEN date   IS A DATE
+GIVETH A NUMBER
+`Weekday of 1st day of month` MEANS
+    `Weekday of 1st day of month` (DATE_MONTH date) (DATE_YEAR date)
+
+GIVEN year  IS A NUMBER
+GIVETH A NUMBER
+`Weekday of 1st day of year` MEANS
+    `Weekday of` (Year year)
+
+GIVEN date  IS A DATE
+GIVETH A NUMBER
+`Weekday of 1st day of year` MEANS
+    `Weekday of 1st day of year` (DATE_YEAR date)
+
+
+
+§§ `Week Functions`
+
+
+GIVEN days  IS A NUMBER
+GIVETH A NUMBER
+`Week of the year` MEANS 
+    `Week of the year` (Date days)
+
+GIVEN date  IS A DATE
+GIVETH A NUMBER
+`Week of the year` MEANS                     -- Returns the number of the week of this date
+    IF    n EQUALS 53 AND `Weeks in year` (DATE_YEAR date) EQUALS 52
+    THEN  1
+    ELSE  IF    n EQUALS 0
+          THEN  `Weeks in year` (DATE_YEAR date MINUS 1)
+          ELSE  n
+    WHERE
+        s MEANS (`Months since year start to days` date)
+            PLUS (DATE_DAY date MINUS 1)
+        w MEANS (`Days in a week` PLUS 2 PLUS (`Weekday of 1st day of year` (DATE_YEAR date)))
+            MODULO `Days in a week`
+        n MEANS CEILING ((s PLUS w MINUS 2) DIVIDED BY `Days in a week`)
+
+GIVEN year  IS A NUMBER
+GIVETH A NUMBER
+`Weeks in year` MEANS             -- Calculating the weeks in a given year using Zeller's Congruence
+    IF        h EQUALS 5
+          OR (h EQUALS 4 AND `is leap year` year)
+    THEN  53
+    ELSE  52
+    WHERE
+        y MEANS FLOOR year MINUS 1
+        k MEANS y MODULO 100
+        j MEANS FLOOR (y DIVIDED BY 100)
+        h MEANS (37 PLUS k
+                    PLUS FLOOR (k DIVIDED BY 4)
+                    PLUS FLOOR (j DIVIDED BY 4)
+                    PLUS (5 TIMES j))
+                MODULO `Days in a week`
+
+GIVEN date   IS A DATE
+GIVETH A NUMBER
+`Weeks in year` MEANS
+    `Weeks in year` (DATE_YEAR date)   
+
+
+
+
+§§ `Attribute Checkers`
+
+
+GIVEN days  IS A NUMBER
+GIVETH A BOOLEAN
+`is weekend` MEANS
+        w EQUALS Saturday
+    OR  w EQUALS Sunday
+    WHERE
+        d MEANS FLOOR days
+        w MEANS `Weekday of` d
+
+GIVEN date  IS A DATE
+GIVETH A BOOLEAN
+`is weekend` MEANS
+    `is weekend` (Day date)
+
+
+GIVEN days  IS A NUMBER
+GIVETH A BOOLEAN
+`is weekday` MEANS
+    NOT `is weekend` days
+
+GIVEN date  IS A DATE
+GIVETH A BOOLEAN
+`is weekday` MEANS
+    `is weekday` (Day date)
+
+GIVEN year  IS A NUMBER
+GIVETH A BOOLEAN
+`is leap year` MEANS
+            y MODULO 4   EQUALS 0
+    AND NOT y MODULO 100 EQUALS 0
+    OR      y MODULO 400 EQUALS 0
+    WHERE
+      y MEANS FLOOR year
+
+GIVEN date   IS A DATE
+GIVETH A BOOLEAN
+`is leap year` MEANS
+    `is leap year` (DATE_YEAR date)
+
+
+
+
+§§ `Relative time phrases`
+
+
+GIVEN day   IS A NUMBER
+      date  IS A DATE
+GIVETH A DATE
+`on day` MEANS
+    date PLUS day MINUS 1
+
+GIVEN date   IS A DATE
+GIVETH A DATE
+`the day after` MEANS
+    date PLUS 1
+
+GIVEN date   IS A DATE
+GIVETH A DATE
+`the day before` MEANS
+    date MINUS 1
+
+GIVEN date   IS A DATE
+GIVETH A DATE
+`the week after` MEANS
+    IF    d GREATER THAN `Days in a week`
+    THEN  Date (days PLUS d MINUS `Days in a week`)
+    ELSE  Date (days PLUS d)
+    WHERE
+        days MEANS Day date
+        d MEANS `Days in a week` MINUS (`Weekday of` days) PLUS Monday
+
+GIVEN date   IS A DATE
+GIVETH A DATE
+`the week before` MEANS
+    `the week after` date MINUS (`Days in a week` TIMES 2)
+
+GIVEN date   IS A DATE
+GIVETH A DATE
+`the month after` MEANS
+    Date 1 (DATE_MONTH date PLUS 1) (DATE_YEAR date)
+
+GIVEN date   IS A DATE
+GIVETH A DATE
+`the month before` MEANS
+    Date 1 (DATE_MONTH date MINUS 1) (DATE_YEAR date)
+
+GIVEN date   IS A DATE
+GIVETH A DATE
+`the year after` MEANS
+    Date 1 1 (DATE_YEAR date PLUS 1)
+
+GIVEN date   IS A DATE
+GIVETH A DATE
+`the year before` MEANS
+    Date 1 1 (DATE_YEAR date MINUS 1)
+
+
+§§ `Comperators`
+
+GIVEN date1  IS A DATE
+      date2  IS A DATE
+GIVETH A DATE
+`the earlier of` MEANS
+    IF   date1 AT MOST date2
+    THEN date1
+    ELSE date2
+
+GIVEN date1  IS A DATE
+      date2  IS A DATE
+GIVETH A DATE
+`the later of` MEANS
+    IF   date1 GREATER THAN date2
+    THEN date1
+    ELSE date2
+
+
+§§ `Stringify for months and weekdays`
+
+
+GIVEN date  IS A DATE 
+GIVETH A STRING
+`Name of month` MEANS
+    `Name of month` (Day date)
+
+GIVEN days  IS A NUMBER
+GIVETH A STRING
+`Name of month` MEANS
+    IF m EQUALS 0 THEN "January" ELSE
+        IF m EQUALS 1 THEN "February" ELSE
+            IF m EQUALS 2 THEN "March" ELSE
+                IF m EQUALS 3 THEN "April" ELSE
+                    IF m EQUALS 4 THEN "May" ELSE
+                        IF m EQUALS 5 THEN "June" ELSE
+                            IF m EQUALS 6 THEN "July" ELSE
+                                IF m EQUALS 7 THEN "August" ELSE
+                                    IF m EQUALS 8 THEN "September" ELSE
+                                        IF m EQUALS 9 THEN "October" ELSE
+                                            IF m EQUALS 10 THEN "November" ELSE
+                                                "December"
+    WHERE
+        d MEANS FLOOR days
+        m MEANS IF    d GREATER THAN 0 AND d LESS THAN 13
+                THEN  d MINUS 1
+                ELSE  FLOOR (DATE_MONTH (Date d) MINUS 1)
+
+GIVEN days   IS A NUMBER
+GIVETH A STRING
+`Name of weekday` MEANS
+    IF w EQUALS Monday THEN "Monday" ELSE
+        IF w EQUALS Tuesday THEN "Tuesday" ELSE
+            IF w EQUALS Wednesday THEN "Wednesday" ELSE
+                IF w EQUALS Thursday THEN "Thursday" ELSE
+                    IF w EQUALS Friday THEN "Friday" ELSE
+                        IF w EQUALS Saturday THEN "Saturday" ELSE
+                            "Sunday"
+    WHERE
+        w MEANS `Weekday of` days
+
+GIVEN date   IS A DATE
+GIVETH A STRING
+`Name of weekday` MEANS
+    `Name of weekday` (Day date)
+
+
+
+§§ `Native overloads`
+
+GIVEN a IS A DATE
+      b IS A DATE
+GIVETH A BOOLEAN
+`__GEQ__` MEANS
+    Day a AT LEAST Day b
+
+GIVEN a IS A DATE
+      b IS A DATE
+GIVETH A BOOLEAN
+`__LEQ__` MEANS
+    Day a AT MOST Day b
+
+GIVEN a IS A DATE
+      b IS A DATE
+GIVETH A BOOLEAN
+`__GT__` MEANS
+    Day a GREATER THAN Day b
+
+GIVEN a IS A DATE
+      b IS A DATE
+GIVETH A BOOLEAN
+`__LT__` MEANS
+    Day a LESS THAN Day b
+
+GIVEN a IS A DATE
+      b IS A DATE
+GIVETH A BOOLEAN
+a `is before` b MEANS a LESS THAN b
+
+GIVEN a IS A DATE
+      b IS A DATE
+GIVETH A BOOLEAN
+a `is after` b MEANS a GREATER THAN b
+
+GIVEN a IS A DATE
+      b IS A NUMBER
+GIVETH A DATE
+`__PLUS__` MEANS
+    Date (Day a PLUS b)
+
+GIVEN a IS A DATE
+      b IS A NUMBER
+GIVETH A DATE
+`__MINUS__` MEANS
+    Date (Day a MINUS b)
+
+GIVEN a IS A NUMBER
+      b IS A DATE
+GIVETH A DATE
+`__PLUS__` MEANS
+    Date (a PLUS Day b)
+
+GIVEN a IS A NUMBER
+      b IS A DATE
+GIVETH A DATE
+`__MINUS__` MEANS
+    Date (a MINUS Day b)
+
+GIVEN a IS A DATE
+      b IS A DATE
+GIVETH A NUMBER
+`__PLUS__` MEANS
+    Day a PLUS Day b
+
+GIVEN a IS A DATE
+      b IS A DATE
+GIVETH A NUMBER
+`__MINUS__` MEANS
+    Day a MINUS Day b
