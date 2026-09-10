@@ -1,11 +1,28 @@
 # L4 Computational Law — plugin bundle
 
+> ## ⚠️ Experimental prototype — may be taken down at any time
+>
+> This repository is an experiment in packaging the L4 authoring skill so it can
+> be used **outside** the [l4-ide](https://github.com/legalese/l4-ide) monorepo,
+> whose plugin install otherwise resolves to a 289 MB clone to deliver half a
+> megabyte of skill.
+>
+> It has **not been through architectural review**. It is not a supported
+> product, it carries no compatibility promise, and it may be **moved, renamed,
+> restructured or deleted without notice or deprecation period**. The upstream
+> decision about whether the plugin should live in its own repository at all has
+> not been taken.
+>
+> If you depend on anything here, vendor it: take a copy, pin a commit, and do
+> not assume this URL resolves next month. The skill itself is stable and lives
+> in l4-ide; it is only this *packaging* that is provisional.
+
 **This directory is generated. Do not edit it by hand.** Every file here was
 copied out of [legalese/l4-ide](https://github.com/legalese/l4-ide) by
 `etc/build-plugin-bundle.mjs`; edits made here are lost on the next build.
 Change the skill in l4-ide at `.claude/skills/writing-l4-rules/` and rebuild.
 
-Generated from l4-ide `7d661166ba1b`.
+Generated from l4-ide `3cf8f64a1e57`.
 
 ## What is here, and why
 
@@ -19,11 +36,20 @@ root. Nothing in the skill text was rewritten.
 The set is computed from the skill's own text, not from a maintained list, so
 citing a new example carries that example on the next build.
 
+One class is deliberately **not** carried: `jl4-core/libraries/*.l4`, the
+standard library. The `l4` binary embeds it at compile time and resolves it
+under the `jl4-embedded` scheme, so a copy here would be a second copy of
+something the runtime already has -- and a second copy that ages past the
+user's binary is worse than none, because an `l4` pointed at a prelude newer
+than itself does not report a version mismatch; it fails as cascading
+`could not find a definition` errors that read as a broken program.
+
 | | |
 |---|---|
 | skill | 22 files |
-| cited material | 49 files |
-| bundle | 4.82 MB |
+| cited material | 44 files |
+| cited but NOT carried | 5 standard-library files |
+| bundle | 4.75 MB |
 | the repo it came from | 289 MB packed |
 
 That last row is the reason this bundle exists: installing the plugin used to
