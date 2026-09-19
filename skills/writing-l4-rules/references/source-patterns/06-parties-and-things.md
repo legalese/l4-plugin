@@ -13,7 +13,7 @@ a wrong answer, that is said, because a shape that type-checks is the more dange
 
 **If the source says**
 
-> `` PARTY   `The Borrower` ``, `` MUST    `pay monthly installment to` ``, `` EXACTLY `The Lender` ``
+> `` PARTY   `The Borrower` ``, `` MUST    `pay monthly installment to` ``, `` `The Lender` ``
 >
 > — `jl4/examples/legal/promissory-note.l4:90-92`, the borrower's payment obligation. The comment
 > beside it: "This function/action is defined in the prelude and expects an object of type Lender
@@ -236,9 +236,9 @@ fills.
 
 > `-- "13.--(1) Where -- (a) no executor is appointed by a will; (b) the executor or all the executors appointed by will are legally incapable of acting as such, or have renounced the right to act as such; ..."`
 >
-> — `jl4/examples/legal/sg-succession/sg-paa.l4:472-474`, Probate and Administration Act 1934
+> — `jl4/examples/canon/sg/succession/sg-paa.l4:472-474`, Probate and Administration Act 1934
 > s 13(1). Limb (b) is encoded at `:498` as
-> ``all (GIVEN p YIELD p's `legally incapable of acting as such` OR p's `has renounced the right to such grant`) executors``.
+> ``all (GIVEN p YIELD p's `legally incapable of acting as such` OR p's `renounced the right to such grant`) executors``.
 
 **It is doing** quantifying over a collection whose size the drafter does not know: every executor,
 each of the governors, all of its purposes.
@@ -248,12 +248,12 @@ each of the governors, all of its purposes.
 ```l4
 DECLARE Executor HAS
     `name`                                  IS A STRING
-    `has renounced the right to such grant` IS A BOOLEAN
+    `renounced the right to such grant` IS A BOOLEAN
 
 GIVEN executors IS A LIST OF Executor
 GIVETH A BOOLEAN
 `s 13(1)(b) -- every executor appointed by the will has renounced` executors MEANS
-    all (GIVEN p YIELD p's `has renounced the right to such grant`) executors
+    all (GIVEN p YIELD p's `renounced the right to such grant`) executors
 ```
 
 **Know what the empty list does.** A universal over nothing is `TRUE`:
@@ -298,7 +298,7 @@ rather than a list.
 
 > ``OR any (GIVEN q YIELD `a survivor stands in the line of` q) (p's `issue`)``
 >
-> — `jl4/examples/legal/sg-succession/sg-isa.l4:149`, the recursive test for whether any descendant
+> — `jl4/examples/canon/sg/succession/sg-isa.l4:149`, the recursive test for whether any descendant
 > of a person survived the intestate.
 
 **It is doing** the existential half of the same job: the rule fires if the property holds of at
@@ -355,7 +355,7 @@ own has nothing to cross-reference with.
 ```l4
 DECLARE Person HAS
     `the reference for this person`   IS A STRING   -- equality of THIS field is identity
-    `is a beneficiary under the will` IS A BOOLEAN
+    `a beneficiary under the will` IS A BOOLEAN
 
 GIVEN a IS A Person
       b IS A Person
@@ -392,7 +392,7 @@ structurally even when the sets are extensionally equal.
 
 > `-- "(2) A prior right to a grant under subsection (1) shall belong to the following persons in the following order: (a) a universal or residuary legatee; ... (e) a creditor of the deceased."`
 >
-> — `jl4/examples/legal/sg-succession/sg-paa.l4:541-547`, Probate and Administration Act 1934
+> — `jl4/examples/canon/sg/succession/sg-paa.l4:541-547`, Probate and Administration Act 1934
 > s 13(2), encoded at `:557` as `` `the section 13(2) rank of` p `` and at `:573` as
 > `` `those with a prior right under section 13(2) in` a ``.
 

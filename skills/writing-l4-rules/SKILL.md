@@ -73,7 +73,7 @@ DECLARE Driver HAS
     `age`            IS A NUMBER
     `years licensed` IS A NUMBER
     `accident count` IS A NUMBER
-    `has tickets`    IS A BOOLEAN
+    `ticketed`    IS A BOOLEAN
 ```
 
 Records can declare **computed fields** (derived attributes) with `MEANS`; see [references/gotchas.md](references/gotchas.md) and <https://legalese.com/l4/reference/types/DECLARE.md>.
@@ -90,7 +90,7 @@ GIVEN driver IS A Driver
 GIVETH A RiskCategory
 DECIDE `assess risk` driver IS
     CONSIDER driver's `accident count`
-    WHEN 0 THEN IF driver's `has tickets`
+    WHEN 0 THEN IF driver's `ticketed`
                 THEN MediumRisk
                 ELSE LowRisk
     WHEN 1 THEN MediumRisk
@@ -231,7 +231,10 @@ When the source text says "must", "may", "shall not", or mentions a deadline, us
 ```
 PARTY   actor
 MUST    action                 -- or MAY / SHANT / DO
-WITHIN  deadline               -- NUMBER (often derived from a DATE/TIME/DATETIME)
+AFTER   opening [OF anchor]    -- optional: when the window OPENS — a NUMBER (duration) or a DATE; an early act is a nullity, reported
+WITHIN  deadline [OF anchor]   -- NUMBER (often derived from a DATE/TIME/DATETIME); anchor: THE JOIN | THE DEADLINE | THE ARMING | a NUMBER/DATE instant
+                               -- beside an AFTER, a bare WITHIN counts from the instant the window opened: AFTER 3 WITHIN 30 is [a+3, a+33]
+                               -- (or BEFORE date: the absolute closing edge; WITHIN takes a duration, BEFORE a date)
 HENCE   nextState              -- optional; consequence on success
 LEST    penaltyState           -- optional; consequence on failure
 ```
@@ -272,13 +275,13 @@ Both type names may be backticked multi-word names, as in `` GIVETH A DEONTIC `A
 
 Actions with fields are **enum constructors** — apply them to arguments like any function (`` `pay invoice` amt recipient ``). Don't use `WITH` inside a `MUST`/`MAY` action; `WITH` is for record construction, not enum constructors.
 
-**Write `BECAUSE "reason"` on every `LEST BREACH`.** The language accepts the bare `LEST BREACH` and `LEST BREACH BY <party>` too — that is why you will see all three spellings — but the reason string is what a trace prints back, and it is what a legal reviewer or a downstream system reads. A breach with no reason reports the failure without saying which clause failed.
+**Write `BECAUSE "reason"` on every `LEST BREACH`.** The language accepts the bare `LEST BREACH`, `LEST BREACH BY <party>` and `LEST BREACH BY LIST <party>, <party>` too — that is why you will see the other spellings — but the reason string is what a trace prints back, and it is what a legal reviewer or a downstream system reads. A breach with no reason reports the failure without saying which clause failed. (A list literal with nobody in it, `BY EMPTY`, is a check-time error.)
 
 **When the duty falls on a group, not one named party, use `EVERY`.** `PARTY` names one actor; `EVERY` binds the same obligation to every member of a list and gives you one place to hang the follow-on:
 
 ```l4
 EVERY Tenant t IN tenants          -- one obligation per tenant, all live at once
-    MUST   Sign (EXACTLY t)
+    MUST   Sign t
     WITHIN 14
     ONCE   ALL HAVE                -- the join line: fires once, at the last signature
     HENCE  `the tenancy begins`
@@ -289,11 +292,11 @@ Three things about it are non-obvious enough that a general-purpose model gets t
 
 1. **The group must be a list, given after `IN`.** Without it the rule parses and type-checks and then **refuses at run time** — so `l4 check` passing is not evidence it will run.
 2. **The join line is mandatory whenever there is a `HENCE` or `LEST`**, and picks the meaning: `ONCE ALL HAVE` fires once when the last member acts (a **barrier**); `UPON EACH` fires once per member as each acts (a **fork**). There is no default.
-3. **Write `EXACTLY t` in the action.** A bare `t` there is a fresh pattern name matching _anyone_, so a stranger's act would discharge the member's duty.
+3. **`t` in the action already refers to the member.** A bare name in an action pattern refers to whatever it names, if it names anything in scope — `t` is the quantifier's own variable, so `MUST Sign t` means the member signs. Only a name that names _nothing_ in scope (or only a field selector of the action's own record type) is a fresh wildcard. `EXACTLY t` still parses but is the deprecated spelling of the same reference; write plain `t`.
 
 Do **not** write `EVERY Tenant t WHO elem t tenants`: that is the pre-2026-09-08 spelling of the roll, deprecated, and it still runs with no warning of any kind. `WHO elem t xs` becomes `IN xs`; `WHO elem t xs AND p` becomes `IN xs WHO p`.
 
-Full treatment — `RAND`/`ROR` composition, `PROVIDED` guards, `EXACTLY` matching, `EVERY` and its join lines, recursive obligations, and `#TRACE` simulation — is in [references/regulative.md](references/regulative.md).
+Full treatment — `RAND`/`ROR` composition, `PROVIDED` guards, action-pattern reference and wildcard matching, `EVERY` and its join lines, recursive obligations, and `#TRACE` simulation — is in [references/regulative.md](references/regulative.md).
 
 ### 6. Validate with the `l4` CLI
 
@@ -362,7 +365,7 @@ gap as a dropped directive.
     `age`            IS 25
     `years licensed` IS 7
     `accident count` IS 0
-    `has tickets`    IS FALSE
+    `ticketed`    IS FALSE
 
 #EVAL   `assess risk` `Alice`
 #ASSERT `assess risk` `Alice` EQUALS LowRisk
@@ -721,7 +724,7 @@ that back typechecks and evaluates. See [Record construction and access](#record
 
 - `@desc` — human-readable description behind any line or `GIVEN` parameter (internal unless paired with `@export`)
 - `@export` — atop the `GIVEN`. mark a function for deployment
-- `@nlg` — natural-language generation hint
+- `@nlg` — natural-language generation hint. **Trails the construct's own line; never the line above it.** A leading `@nlg` under a `GIVEN` is captured by the signature and the rule renders as a bare name — clean typecheck, no diagnostic. Takes a language tag, `@nlg:he`. [gotchas](references/gotchas.md) has the measurement and the three limits of the tag.
 - `@ref`, `@ref-src`, `@ref-map` — cross-reference to a legal source
 
 ### Imports
@@ -762,7 +765,7 @@ GIVETH A BOOLEAN
 isEligible p MEANS p's citizen && p's years >= 5 && !p's disqualified
 ```
 
-**Use backtick identifiers liberally.** `` `the applicant` `` not `applicant`. `` `has valid identification` `` not `hasValidID`.
+**Use backtick identifiers liberally.** `` `the applicant` `` not `applicant`. `` `valid identification` `` not `hasValidID`.
 
 ---
 

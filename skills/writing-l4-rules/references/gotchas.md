@@ -121,7 +121,7 @@ The ellipsis operators are implicit conjunction/disjunction — they let you wri
 
 ```l4
 DECIDE `eligible for discount` IF
-    `is existing customer`
+    `existing customer`
     ...
     `has clean payment history`
     ...
@@ -190,7 +190,7 @@ Any identifier containing spaces or punctuation must be backtick-quoted:
 
 ```l4
 `the applicant`
-`has valid identification`
+`valid identification`
 `the person must not sell alcohol`
 ```
 
@@ -371,7 +371,8 @@ squared x MEANS x TIMES x
 
 ## Annotation fence
 
-All annotations begin with `@` and apply to the following definition:
+All annotations begin with `@`. Most apply to the **following** definition — but `@nlg` does
+not, and that exception is the subject of the next section. Read it before writing one:
 
 | Annotation | Purpose                                                            |
 | ---------- | ------------------------------------------------------------------ |
@@ -383,6 +384,89 @@ All annotations begin with `@` and apply to the following definition:
 | `@ref-map` | Mapping table for references                                       |
 
 `@ref` / `@ref-src` / `@ref-map` are the "link this rule to §3.2 of the statute" annotations — use them whenever the source document has stable citations.
+
+### `@nlg` attaches BACKWARD, and that is the one exception to the line above
+
+**Write `@nlg` at the end of the construct's own line, trailing the signature, with the body on
+the next line.** That is the form
+[`doc/tutorials/natural-language-functions/optimising-natural-language-generation.md`](https://legalese.com/l4/tutorials/natural-language-functions/optimising-natural-language-generation.md)
+teaches under "Where it goes: end of the line", and it always works:
+
+```l4
+GIVEN x IS A NUMBER, y IS A NUMBER
+GIVETH A NUMBER
+`the greater of` x y @nlg the greater of %x% and %y%
+  MEANS IF x >= y THEN x ELSE y
+```
+
+**Why it matters, and why the wrong form looks right.** A leading `@nlg` on its own line does
+work in some places — above a `DECLARE`, or above a rule with no signature — so it reads as
+supported. It is not, where it matters most: when a `GIVEN` or `GIVETH` block sits above it,
+the signature captures the annotation and the rule below gets nothing. Measured 2026-09-19 on
+a binary at `ae74ae717`, one file, two adjacent lines, both written leading:
+
+```
+@ref  ->  MkDecide > MkAppForm            -- forward, onto the rule
+@nlg  ->  MkTypeSig > MkGivenSig > MkName -- backward, into the signature
+```
+
+**The failure is silent and goldens do not catch it.** The module type-checks, `l4 check`
+succeeds, no diagnostic is emitted, and `l4 nlg` prints the bare identifier — so a blessed
+`.nlg.golden` records the bare name as the expected output and defends it thereafter. That is
+not hypothetical: `jl4/examples/ok/nlg-percent.l4`'s own golden has been green for as long as
+it has existed while showing bare names for all seven of its annotations. A blank line between
+the signature and the annotation does **not** release the capture.
+
+**Evidence that this is the default mistake rather than a corner.** Three independent encodings
+written against this skill on 2026-09-19 produced 334 `@nlg` heralds, of which **289 used the
+leading form** and one rendered. Every one of those authors had this file and none had the
+tutorial page above.
+
+> **Status, so this note can be retired rather than rot.** `legalese/l4-ide#433` is OPEN, not
+> merged, and confines a `GIVEN` block's annotations to the block. When it lands, the leading
+> form stops being captured and this section reduces to a style preference. Two things it does
+> **not** change: a record field's own `@nlg` renders in no placement today, trailing or
+> leading; and nothing has been ruled about what a leading annotation below a field should mean.
+> Check `#433` before deleting any of this.
+
+### `@nlg:xx` — one rendering per name, tagged by language
+
+`@nlg` takes an optional language subtag: `@nlg:he`, `@nlg:en`, `@nlg:pt-BR`. Landed in
+`legalese/l4-ide#423`. Measured 2026-09-19 on a binary at `ae74ae717`:
+
+```l4
+DECIDE `שכר כולל` @nlg:he השכר הכולל
+            `בסיס` @nlg:he שכר הבסיס
+            `תוספת` @nlg:he התוספת
+    IS (`בסיס` PLUS `תוספת`)
+```
+
+`l4 nlg` prints `השכר הכולל with 9172 and 1500` — the tag names the rendering and **does not
+leak into the prose**, and `l4 format` round-trips the file byte-identically.
+
+Three limits, all measured on that binary, each with the thing that would retire it:
+
+- **One rendering per name.** Two `@nlg` on one name attach **neither**. So a file carries one
+  language today; you cannot ship `@nlg:he` and `@nlg:en` side by side. Multiplicity is
+  `#429`, open, and stacked on `#427`, also open.
+- **Nothing selects on the tag.** There is no `l4 nlg --lang` — read `l4 nlg --help` rather
+  than assuming, because this one has been reported as landed more than once. Until selection
+  exists, a tag is documentation of intent, not a switch.
+- **The frame stays English.** Look again at the output above: `with` and `and` are the
+  linearizer's own connectives, not yours. A tag names the _rendering_; it does not localise
+  the sentence built around it. Module-level `@lang` is `#431`, **open** — and on today's
+  binary `@lang he` is not an unknown-annotation warning but a **lexer error**, `unexpected
+'@'`, exit 1. Do not write it yet.
+
+**Non-Latin identifiers themselves are fine** and need no annotation: L4 takes Hebrew, and by
+the same rule any `Lo`-category script, in every name position — bare and backticked names,
+types, constructors, record fields, mixfix operators, `§` titles. The genitive `'s` works after
+one. The single hard limit is that **bidi control characters** (U+200E, U+200F, U+202A–U+202E,
+U+2066–U+2069) are a lex error inside backticks: a right-to-left file relies on the viewer's
+bidi algorithm, and mixed-direction lines that look wrong in an editor are usually right in the
+file. Do not "fix" one by inserting a mark. Combining marks are legal but keep them out of
+identifiers — L4 counts source columns in codepoints, so niqqud makes a column count disagree
+with a table formatter's, and the symptom is a mis-aligned ditto caret, which is silent.
 
 ---
 

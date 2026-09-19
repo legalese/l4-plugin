@@ -54,7 +54,7 @@ halves, and do not let the prohibition talk you out of the role:
 --    licence under section 6.
 
 DECLARE Applicant HAS
-    `has applied for a licence under section 6` IS A BOOLEAN
+    `applied for a licence under section 6` IS A BOOLEAN
     `age in years`                              IS A NUMBER
 
 -- The DEFINITIONAL half: the test the drafter wrote down, asked of any person.
@@ -63,7 +63,7 @@ GIVEN `the person` IS AN Applicant
 GIVETH A BOOLEAN
 `s 5 — the person is the applicant` `the person` MEANS
         "a person who has applied for a licence under section 6"
-    ... `the person`'s `has applied for a licence under section 6`
+    ... `the person`'s `applied for a licence under section 6`
 
 § `Part 2 — Licences`
     -- The ROLE half: which person this run is about. "In this Part" is the scope.
@@ -149,8 +149,8 @@ subtree, and a rule that reaches two at once is an error naming both.
 
 ## 1.3 "a person ('P')", "(the 'Purchaser')" — the parenthetical label
 
-**If the source says** — this device does **not** occur in the encoded corpus. Checked across all 26
-files under `jl4/examples/legal/`: no `("P")`, no `(the "Purchaser")`, no `(hereinafter …)`, in
+**If the source says** — this device does **not** occur in the encoded corpus. Checked across all 35
+files under `jl4/examples/legal/` and `jl4/examples/canon/` (measured 2026-09-16): no `("P")`, no `(the "Purchaser")`, no `(hereinafter …)`, in
 quoted text or in comments. Modern United Kingdom drafting uses it constantly, and the encoded slice
 of the British Nationality Act 1981 does not reach one. The nearest corpus analogue is the role
 parameter `GIVEN person IS A PersonProfile` (`jl4/examples/legal/bna/bna.l4:257`, and 28 more
@@ -458,14 +458,14 @@ file cannot show it:
 -- it up and answer it, so it is a fact about the case: a field.
 DECLARE Applicant HAS
     `age in years`                          IS A NUMBER
-    `has been disqualified under section 9` IS A BOOLEAN
+    `been disqualified under section 9` IS A BOOLEAN
 
 @ref Licensing Act s 6(1)
 GIVEN `the person` IS AN Applicant
 GIVETH A BOOLEAN
 `s 6(1) — a licence may be granted to` `the person` MEANS
         `the person`'s `age in years` AT LEAST 18
-    AND NOT `the person`'s `has been disqualified under section 9`
+    AND NOT `the person`'s `been disqualified under section 9`
 
 -- READING 2 — s 9 is a RULE, with its own conditions, that this encoding does
 -- not contain. Nobody can supply its answer, so the honest shape is a refusal.
@@ -491,18 +491,18 @@ three assertions below are satisfied:
 ```l4
 `an applicant aged 25 who is not disqualified` MEANS Applicant WITH
     `age in years`                          IS 25
-    `has been disqualified under section 9` IS FALSE
+    `been disqualified under section 9` IS FALSE
 
 `an applicant aged 17` MEANS Applicant WITH
     `age in years`                          IS 17
-    `has been disqualified under section 9` IS FALSE
+    `been disqualified under section 9` IS FALSE
 
 #ASSERT `s 6(1) — a licence may be granted to` `an applicant aged 25 who is not disqualified`
 #ASSERT REFUSED `s 6(1) — a licence may be granted to, deciding s 9 here` `an applicant aged 25 who is not disqualified`
 #ASSERT NOT `s 6(1) — a licence may be granted to, deciding s 9 here` `an applicant aged 17`
 ```
 
-**Not** a field named for a rule. `` `has been disqualified under section 9` `` is defensible
+**Not** a field named for a rule. `` `been disqualified under section 9` `` is defensible
 because disqualification is a status a register holds; `` `satisfies section 9` `` on a section that
 computes something would be a promise the caller cannot keep.
 
@@ -646,7 +646,7 @@ sub-paragraph, tagged with its own number:
 § `Regulation Crowdfunding`
 
 DECLARE IntermediaryProfile HAS
-    `is a broker acting as an intermediary in a section 4(a)(6) transaction` IS A BOOLEAN
+    `a broker acting as an intermediary in a section 4(a)(6) transaction` IS A BOOLEAN
     `offers investment advice or recommendations`                            IS A BOOLEAN
     `solicits purchases, sales or offers to buy the securities displayed on its platform` IS A BOOLEAN
     `holds, manages, possesses, or otherwise handles investor funds or securities`        IS A BOOLEAN
@@ -655,7 +655,7 @@ DECLARE IntermediaryProfile HAS
 GIVEN intermediary IS AN IntermediaryProfile
 GIVETH A BOOLEAN
 DECIDE `the intermediary is a funding portal` intermediary IF
-        intermediary's `is a broker acting as an intermediary in a section 4(a)(6) transaction`
+        intermediary's `a broker acting as an intermediary in a section 4(a)(6) transaction`
     AND NOT "(i)"   ... intermediary's `offers investment advice or recommendations`
     AND NOT "(ii)"  ... intermediary's `solicits purchases, sales or offers to buy the securities displayed on its platform`
     AND NOT "(iv)"  ... intermediary's `holds, manages, possesses, or otherwise handles investor funds or securities`
@@ -866,7 +866,7 @@ GIVETH A BOOLEAN
 _(Checked on the release binary, exit 0, no errors;
 `` #ASSERT `s 36(1)(a) — …` `a claim in tort` `` and the `#ASSERT NOT` for an unscheduled proceeding
 are both satisfied. `Schedule item 2` is elided above for length.)_ The corpus does this at
-`jl4/examples/legal/sg-succession/sg-paa.l4:1582-1591`, where the Probate and Administration Act's
+`jl4/examples/canon/sg/succession/sg-paa.l4:1582-1591`, where the Probate and Administration Act's
 Second Schedule is eight named items gathered into one `LIST`, each carrying its `paragraph` and its
 `text` — kept at its own number, in the file's words, "because the app shows the Schedule as the
 Schedule reads" (`:1572-1573`).
