@@ -1,0 +1,18 @@
+-- DITTO (`^`) copies the token above it, positionally. The declaration it
+-- copies here is a section GIVEN (the deprecated ASSUME spelling of the same
+-- fixture used to sit at the left margin).
+§ `Ditto`
+    GIVEN x IS A BOOLEAN
+          y ^  ^ ^
+          n ^  ^ NUMBER
+
+-- we can even have whitespace and comments in between
+
+          m ^  ^ ^
+
+test MEANS
+  IF n AT LEAST m
+  THEN    x
+       OR y
+       ^  x
+  ELSE TRUE

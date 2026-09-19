@@ -325,7 +325,7 @@ A refusal is an expression at **any** type, so it needs no sentinel constructor 
 
 **Where no rule reaches the boundary, a comment is still the right thing** — it documents a gap that
 cannot be hit. State which way the omission errs, as the corpus does
-(`jl4/examples/legal/sg-succession/sg-wills.l4:278-280`):
+(`jl4/examples/canon/sg/succession/sg-wills.l4:278-280`):
 
 ```text
 -- WHICH WAY THE OMISSION ERRS. s 5 only ever ADDS ways of being properly
@@ -605,7 +605,7 @@ is about the construct it names.
 that was proposed and not landed; it was written the day before the discharge change and went stale
 the day after). ``#EVAL `the fee` WITH `applicable rate` IS 0.2``, and the same form at `#ASSERT`
 and at an ordinary call site inside another rule. The supply reaches the rule _and everything it
-relies on_, so a rule that only touches the binder through a helper is supplied too; two different
+relies on_, so a rule that only touches the input through a helper is supplied too; two different
 values may be supplied in one expression, and each call gets its own. Values for a deployment still
 come from a web form, from `l4 batch --inputs cases.json`, or from the service request.
 
@@ -616,7 +616,7 @@ come from a web form, from `l4 batch --inputs cases.json`, or from the service r
 #ASSERT (`total` WITH `the teacher` IS `t1`) EQUALS 36          -- right
 ```
 
-and the diagnostic for the first names `__EQUALS__` and the binder, never `WITH` — so it does not
+and the diagnostic for the first names `__EQUALS__` and the input, never `WITH` — so it does not
 look like a precedence problem, which is what makes it worth knowing before you write the
 two-hundredth assertion.
 
@@ -632,7 +632,7 @@ delegation that reads the section `GIVEN`. Exercise the first with `#ASSERT`, an
 ```l4
 DECLARE Applicant HAS
     `age in years`                          IS A NUMBER
-    `has been disqualified under section 9` IS A BOOLEAN
+    `been disqualified under section 9` IS A BOOLEAN
 
 § `Part 2 — Licences`
     GIVEN `the applicant` IS AN Applicant
@@ -643,7 +643,7 @@ GIVEN `the person` IS AN Applicant
 GIVETH A BOOLEAN
 `s 6(1) — a licence may be granted to` `the person` MEANS
         `the person`'s `age in years` AT LEAST 18
-    AND NOT `the person`'s `has been disqualified under section 9`
+    AND NOT `the person`'s `been disqualified under section 9`
 
 -- The Part's own rule, in the Part's own words, reading the section GIVEN.
 @ref Licensing Act s 6(1)
@@ -653,7 +653,7 @@ GIVETH A BOOLEAN
 
 `an applicant aged 25 who is not disqualified` MEANS Applicant WITH
     `age in years`                          IS 25
-    `has been disqualified under section 9` IS FALSE
+    `been disqualified under section 9` IS FALSE
 
 #ASSERT `s 6(1) — a licence may be granted to` `an applicant aged 25 who is not disqualified`
 #CHECK  `s 6(1) — the applicant may be granted a licence`
@@ -710,13 +710,13 @@ l4 catala: cannot compile these decisions to Catala:
     a parameter instead
 ```
 
-Marking the helper `@export` too does lift it, and the Catala that comes out is correct — the binder
+Marking the helper `@export` too does lift it, and the Catala that comes out is correct — the section GIVEN
 becomes an `input` on every scope and the caller threads it. The price is one published scope per
-rule that reads the binder, where you wanted a helper. So this is a cost, not a wall; on a heading
+rule that reads the input, where you wanted a helper. So this is a cost, not a wall; on a heading
 with ten rules under it, it is a large one.
 
 That is ruled, not accidental: `specs/todo/IMPLICIT-PROPS-DESIGN.md` § 11.10 (**R10**, ruled
-2026-09-04) moves the backends onto the discharged AST, where the binder is an ordinary parameter
+2026-09-04) moves the backends onto the discharged AST, where the section GIVEN is an ordinary parameter
 and the refusal cannot arise. It is not yet built. Until it is, a module you will export to Catala
 is one to write with rule `GIVEN`s.
 

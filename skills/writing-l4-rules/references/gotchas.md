@@ -76,6 +76,40 @@ sky_is_romantic phase MEANS
 
 Each `^` stands for the token at the same column on the previous line. Without ditto you would repeat `phase EQUALS` four times. This is a legal-drafting affordance, not a general-purpose operator.
 
+**What ditto does and does not buy.** It does **not** shorten a line: a `^` is padded out to exactly the width of the token it replaces, so the column layout — and therefore the line length — is unchanged by construction. Measured on a real 36×9 salary table, converting a row to ditto saved _one_ character, and that was a rounding artefact. What it buys is data/ink: the repeated tokens become whitespace, so the eye lands only on what varies. Reach for it to make a table readable, never to make it fit. The lever that actually narrows a wide row is positional `OF` construction (320 characters → 184 on that same row).
+
+**The traps, all verified against the `l4` binary. Sort them by whether they are loud or silent — that asymmetry is the whole risk profile of this operator.**
+
+Loud, so cheap:
+
+- **`^` copies one token.** `AT MOST` is two, so a single caret beneath it copies `AT` and the parser then rejects the caret outright. Write two-word operators out in full on every row.
+- **"The line above" means the previous _token-bearing_ line.** Blank lines and comment-only lines are skipped, so you may separate the rows with either — `jl4/examples/ok/ditto.l4` does exactly that and says so. But any line carrying real tokens becomes the new reference line, and a type signature is the one that catches people: putting `GIVETH A NUMBER` between two rules makes the caret beneath it resolve against `GIVETH A NUMBER`. This is the first thing a model hand-writing two adjacent rules will hit.
+
+Silent, so expensive — these are the ones to design against:
+
+- **A backtick name dittoes whole, which quietly answers with the wrong field.** `` `at rank 2` `` cannot ditto down from `` `at rank 1` ``; there is no sub-token to copy, so the caret copies the earlier field name _entire_ and the rule reads the wrong column:
+
+```l4
+`amount` `the row` `the rank` MEANS
+    BRANCH IF `the rank` AT MOST 1 THEN `the row`'s `at rank 1`
+           OTHERWISE                    ^        ^  ^
+```
+
+The `OTHERWISE` arm answers with rank 1 for every rank there is — zero errors, exit 0, and on a salary table it is the wrong money. Whole names ditto; parts of names never do.
+
+- **Column position is semantics, so editing a line silently rebinds every caret below it.** Nothing warns you:
+
+```l4
+small MEANS 10
+big   MEANS 90
+c1 MEANS small AT LEAST 5
+c2 MEANS ^     AT MOST  50   -- copies `small`; c2 is TRUE
+```
+
+Change line 3's subject to `big` — leaving the caret alone — and `c2` becomes FALSE, with no error and no warning, because the caret still resolves, just to a different token. If a caret's column lands on _nothing_, you get a loud `unexpected ^`; if it lands on the _wrong_ token you may get nothing at all. **So generate aligned tables from a script rather than hand-typing them**, and after editing any line in a dittoed block, re-check every caret beneath it.
+
+`l4 format` is not a threat to this style: measured on a real 36×9 dittoed file, its output is byte-identical, 79 carets in and 79 out.
+
 ---
 
 ## Asyndetic operators `...` and `..`
@@ -87,7 +121,7 @@ The ellipsis operators are implicit conjunction/disjunction — they let you wri
 
 ```l4
 DECIDE `eligible for discount` IF
-    `is existing customer`
+    `existing customer`
     ...
     `has clean payment history`
     ...
@@ -156,7 +190,7 @@ Any identifier containing spaces or punctuation must be backtick-quoted:
 
 ```l4
 `the applicant`
-`has valid identification`
+`valid identification`
 `the person must not sell alcohol`
 ```
 
@@ -337,7 +371,8 @@ squared x MEANS x TIMES x
 
 ## Annotation fence
 
-All annotations begin with `@` and apply to the following definition:
+All annotations begin with `@`. Most apply to the **following** definition — but `@nlg` does
+not, and that exception is the subject of the next section. Read it before writing one:
 
 | Annotation | Purpose                                                            |
 | ---------- | ------------------------------------------------------------------ |
@@ -349,6 +384,78 @@ All annotations begin with `@` and apply to the following definition:
 | `@ref-map` | Mapping table for references                                       |
 
 `@ref` / `@ref-src` / `@ref-map` are the "link this rule to §3.2 of the statute" annotations — use them whenever the source document has stable citations.
+
+### `@nlg` placement, and the one place it still renders nothing
+
+**Both placements work.** Trailing the construct's own line, or on the line immediately above
+it — either reaches the rule. Measured 2026-09-19 on a binary at `ae0c2593a`:
+
+```l4
+GIVEN n IS A NUMBER
+@nlg:he שורה משלה
+DECIDE `כפול` n IS n TIMES 2
+```
+
+`l4 nlg` prints `שורה משלה with 21`.
+
+> **This is recent, and a corpus written before it will not reflect it.** Until
+> `legalese/l4-ide#433` merged, a leading annotation under a `GIVEN` was captured by the
+> signature and the rule rendered as a bare name — silently, with a clean typecheck and no
+> diagnostic. Three independent encodings written days before it produced 334 heralds, 289 of
+> them leading, one of which rendered. If you are reading an older encoding and its renderings
+> look absent, that is why; the fix is to re-run, not to rewrite the placement.
+
+**The residue: a record field's own herald renders in NO placement.** The type-level annotation
+on the same `DECLARE` renders; the field-level one does not, trailing or leading alike.
+
+```l4
+DECLARE Payslip
+    HAS base IS A NUMBER
+        @nlg the basic salary        -- renders nothing, either way round
+```
+
+`l4 nlg` still prints ``where `base` is 100``. This is deliberate, not an oversight: a field and
+its type can be glossed separately on one line, and letting the field claim the whole line makes
+the two collide. What a leading annotation _below_ a field should mean is **unruled** — so do
+not spend effort annotating fields expecting prose out of it.
+
+### `@nlg:xx` and `@lang` — several renderings, selected by language
+
+A herald takes a language subtag, and **a name may carry more than one**:
+
+```l4
+@lang he
+GIVEN n IS A NUMBER
+@nlg:he שורה משלה
+@nlg:en the doubling rule
+DECIDE `כפול` n IS n TIMES 2
+```
+
+- `l4 nlg FILE --lang he` → `שורה משלה with 21`
+- `l4 nlg FILE --lang en` → `the doubling rule with 21`
+
+`l4 render` takes `--lang` too, which is the flag that produces a bilingual set of **documents**
+rather than linearized prose. `@lang he` at module level declares what an **untagged** `@nlg` in
+that module means, so an existing monolingual file gets labelled without touching every herald.
+
+**One thing a tag does not buy, and it surprises people.** Look again at the output above: `with`
+is the linearizer's own connective, not yours. A tag names the _rendering_; **it does not
+localise the sentence built around it**, and `@lang` does not either — that was measured, not
+assumed. A right-to-left document still has English scaffolding between its Hebrew renderings.
+
+**Non-Latin identifiers need no annotation at all.** L4 takes Hebrew — and by the same rule any
+`Lo`-category script — in every name position: bare and backticked names, types, constructors,
+record fields, mixfix operators, `§` titles. The genitive `'s` works after one, and `l4 format`
+round-trips byte-identically. Two limits:
+
+- **Bidi control characters are a lex error inside backticks** (U+200E, U+200F, U+202A–U+202E,
+  U+2066–U+2069). A right-to-left file relies on the viewer's bidi algorithm, so mixed-direction
+  lines that look wrong in an editor are usually right in the file. Never "fix" one with a mark.
+- **Keep combining marks out of identifiers.** They are legal, but L4 counts source columns in
+  codepoints, so niqqud makes a column count disagree with a table formatter's — and the symptom
+  is a mis-aligned ditto caret, which is the silent kind.
+
+---
 
 ---
 
