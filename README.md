@@ -22,7 +22,7 @@ copied out of [legalese/l4-ide](https://github.com/legalese/l4-ide) by
 `etc/build-plugin-bundle.mjs`; edits made here are lost on the next build.
 Change the skill in l4-ide at `.claude/skills/writing-l4-rules/` and rebuild.
 
-Generated from l4-ide `4e59a6e08aeb`.
+Generated from l4-ide `d08880fa076a`.
 
 ## What is here, and why
 
@@ -47,9 +47,9 @@ than itself does not report a version mismatch; it fails as cascading
 | | |
 |---|---|
 | skill | 22 files |
-| cited material | 53 files |
+| cited material | 51 files |
 | cited but NOT carried | 5 standard-library files |
-| bundle | 4.94 MB |
+| bundle | 4.92 MB |
 | the repo it came from | 289 MB packed |
 
 That last row is the reason this bundle exists: installing the plugin used to
