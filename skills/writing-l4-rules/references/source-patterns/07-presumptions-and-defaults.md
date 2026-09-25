@@ -11,7 +11,7 @@ One area of the phrasebook. The index, the preamble and the other ten areas are 
 
 > `The deeming reaches ONLY subsection (1): "deemed for the purposes of subsection (1)". A foundling gets no help toward subsection (1A)`
 >
-> — `jl4/examples/legal/bna/bna.l4:263-266`, on British Nationality Act 1981 s 1(2)
+> — `jl4/examples/canon/uk/bna-1981/bna.l4:263-266`, on British Nationality Act 1981 s 1(2)
 
 **It is doing** rewriting the facts **before** the rule runs, rather than handling a gap afterwards.
 This is how a statute avoids a non-answer, and it is why nothing in L4 catches a refusal: the legal
@@ -57,7 +57,7 @@ verbatim words stay whole — a deemed fact is one of the three cases it names.
 
 > `-- AMBIGUITY: "unless the contrary is shown". What must be shown to the contrary — the deemed birth facts of limb (a), the deemed parentage of limb (b), or either?`
 >
-> — `jl4/examples/legal/bna/bna.l4:230-240`, on British Nationality Act 1981 s 1(2). The note ends:
+> — `jl4/examples/canon/uk/bna-1981/bna.l4:230-240`, on British Nationality Act 1981 s 1(2). The note ends:
 > "Sergot et al. (1986) §'Some Difficulties with the Formalization of Negation' (pp. 378-381)
 > wrestle with the same default; their encoding, like this one, makes rebuttal an explicit input."
 
@@ -147,7 +147,7 @@ shape of the negated input.
 
 > `-- ... administration expenses and debts still come off the top (s 5: "after payment thereout"). They are borne rateably by the part this Act governs, in the absence of any direction otherwise`
 >
-> — `jl4/examples/legal/sg-succession/sg-isa.l4:125-128`.
+> — `jl4/examples/canon/sg/succession/sg-isa.l4:125-128`.
 
 **It is doing** stating a **fallback value**. There is a value the parties (or the will, or the
 contract) may set; where they have not, the instrument supplies one. The two are the same quantity,
@@ -252,7 +252,7 @@ record fields, rule `GIVEN` parameters and `ASSUME` declarations, and whose own 
 
 > `... "No presumption shall arise that a funding portal has violated the prohibitions under section 3(a)(80) of the Exchange Act or this part by reason of ... engaging in activities ... that do not meet the conditions specified in paragraph (b) of this section."`
 >
-> — `jl4/examples/legal/regcf/denovo/regcf-denovo.l4:2881`, carried verbatim. The note above it, at
+> — `jl4/examples/canon/us/regcf/cleanroom/regcf-denovo.l4:2881`, carried verbatim. The note above it, at
 > `:2881-2883`: "Encoded as a definition carrier, because turning 'no presumption shall arise' into a
 > boolean would assert something the paragraph is careful not to assert."
 
@@ -296,7 +296,7 @@ words are the whole content.
 
 > `-- "No will shall be revoked by any presumption of an intention on the ground of an alteration in circumstances."`
 >
-> — `jl4/examples/legal/sg-succession/sg-wills.l4:489-490`, Wills Act 1838 s 14. The note beside it:
+> — `jl4/examples/canon/sg/succession/sg-wills.l4:489-490`, Wills Act 1838 s 14. The note beside it:
 > "Constant FALSE, and it earns its place. s 14 abolishes a doctrine, and the only way to encode an
 > abolition is to carry the abolished ground as a disjunct that can never fire."
 
@@ -341,7 +341,7 @@ stub", for the neighbouring case where the whole provision is gone, and entry
 
 > `-- "8. The following provisions shall also apply: (a) the order of application may be varied by the will of the deceased; and (b) this Schedule does not affect the liability of land ..."`
 >
-> — `jl4/examples/legal/sg-succession/sg-paa.l4:1566-1569`, Probate and Administration Act 1934
+> — `jl4/examples/canon/sg/succession/sg-paa.l4:1566-1569`, Probate and Administration Act 1934
 > Second Schedule item 8. The note: "Item 8 is not a class of assets. It is a rider on the seven that
 > precede it ... 8(a) is the provision that lets a well-drafted will move everything above it."
 

@@ -16,7 +16,7 @@ first `yes` — six of its seven rows send you somewhere else.
 
 > `6(3)-(4) (the States' power to add heads by Regulations)` — listed among the parts that "are out of scope"
 >
-> — `jl4/examples/legal/charities-cleanroom/charity-test.l4:22-25`
+> — `jl4/examples/canon/je/charities-2014/charity-test.l4:22-25`
 
 **It is doing** one of two things, and you must decide which before writing anything:
 
@@ -179,7 +179,7 @@ compute with, and a draft that silently prices a blank at zero is worse than one
 
 > `s 7 rule 3 — "Subject to the rights of the surviving spouse, if any, the estate (both as to the undistributed portion and the reversionary interest) of an intestate who leaves issue shall be distributed by equal portions per stirpes"`
 >
-> — `jl4/examples/legal/sg-succession/cleanroom-2026-08/intestate-succession-act.l4:1126`
+> — `jl4/examples/canon/sg/succession/cleanroom/intestate-succession-act.l4:1126`
 
 **It is doing** the drafter's own hedge that a thing may not exist, together with an instruction on
 what follows when it does not. The absence is a fact about the case, as solid as any number.
@@ -299,7 +299,7 @@ prose in the corpus — 25-plus sites. One of them:
 
 > `-- ... the honest answer is a refusal, not a guess. Outside the band the ordinary tiers were unaffected and the answer stands.`
 >
-> — `jl4/examples/legal/regcf/regcf.l4:482-484`, on the temporary rules made during the coronavirus
+> — `jl4/examples/canon/us/regcf/regcf.l4:482-484`, on the temporary rules made during the coronavirus
 > disease 2019 pandemic
 
 **It is doing** marking the boundary of the model. The question is only whether a rule can **reach**
@@ -325,7 +325,7 @@ A refusal is an expression at **any** type, so it needs no sentinel constructor 
 
 **Where no rule reaches the boundary, a comment is still the right thing** — it documents a gap that
 cannot be hit. State which way the omission errs, as the corpus does
-(`jl4/examples/legal/sg-succession/sg-wills.l4:278-280`):
+(`jl4/examples/canon/sg/succession/sg-wills.l4:278-280`):
 
 ```text
 -- WHICH WAY THE OMISSION ERRS. s 5 only ever ADDS ways of being properly
@@ -402,7 +402,7 @@ directive may be split over two lines, as above, and asserts equally on a named 
 an argument and on one called bare.
 
 The year parameter above is this page's simplification. The corpus selects the figure on a rule
-date rather than a year — `jl4/examples/legal/regcf/regcf.l4:148-154`, whose `OTHERWISE` arm over
+date rather than a year — `jl4/examples/canon/us/regcf/regcf.l4:148-154`, whose `OTHERWISE` arm over
 `` `the rules in force include` `` is reached through `EVAL UNDER RULES EFFECTIVE AT`. That arm is
 still an `ASSUME`, not yet a refusal; the shape is what to copy, not the keyword.
 `jl4/examples/ok/refuse.l4:25-26` is the smallest runnable pair in the tree.
@@ -605,7 +605,7 @@ is about the construct it names.
 that was proposed and not landed; it was written the day before the discharge change and went stale
 the day after). ``#EVAL `the fee` WITH `applicable rate` IS 0.2``, and the same form at `#ASSERT`
 and at an ordinary call site inside another rule. The supply reaches the rule _and everything it
-relies on_, so a rule that only touches the binder through a helper is supplied too; two different
+relies on_, so a rule that only touches the input through a helper is supplied too; two different
 values may be supplied in one expression, and each call gets its own. Values for a deployment still
 come from a web form, from `l4 batch --inputs cases.json`, or from the service request.
 
@@ -616,7 +616,7 @@ come from a web form, from `l4 batch --inputs cases.json`, or from the service r
 #ASSERT (`total` WITH `the teacher` IS `t1`) EQUALS 36          -- right
 ```
 
-and the diagnostic for the first names `__EQUALS__` and the binder, never `WITH` — so it does not
+and the diagnostic for the first names `__EQUALS__` and the input, never `WITH` — so it does not
 look like a precedence problem, which is what makes it worth knowing before you write the
 two-hundredth assertion.
 
@@ -632,7 +632,7 @@ delegation that reads the section `GIVEN`. Exercise the first with `#ASSERT`, an
 ```l4
 DECLARE Applicant HAS
     `age in years`                          IS A NUMBER
-    `has been disqualified under section 9` IS A BOOLEAN
+    `been disqualified under section 9` IS A BOOLEAN
 
 § `Part 2 — Licences`
     GIVEN `the applicant` IS AN Applicant
@@ -643,7 +643,7 @@ GIVEN `the person` IS AN Applicant
 GIVETH A BOOLEAN
 `s 6(1) — a licence may be granted to` `the person` MEANS
         `the person`'s `age in years` AT LEAST 18
-    AND NOT `the person`'s `has been disqualified under section 9`
+    AND NOT `the person`'s `been disqualified under section 9`
 
 -- The Part's own rule, in the Part's own words, reading the section GIVEN.
 @ref Licensing Act s 6(1)
@@ -653,7 +653,7 @@ GIVETH A BOOLEAN
 
 `an applicant aged 25 who is not disqualified` MEANS Applicant WITH
     `age in years`                          IS 25
-    `has been disqualified under section 9` IS FALSE
+    `been disqualified under section 9` IS FALSE
 
 #ASSERT `s 6(1) — a licence may be granted to` `an applicant aged 25 who is not disqualified`
 #CHECK  `s 6(1) — the applicant may be granted a licence`
@@ -693,7 +693,7 @@ the delegating rule's `GIVEN`-parameterised twin and not on the section `GIVEN`;
 `GIVEN` there is a check error, not a parse error.
 [Entry 1.5](01-definitions-and-scope.md#e1-5) has the detail.
 
-**Not, yet, in a module whose deliverable is a Catala export.** `l4 catala` refuses a section
+**Not, yet, in a module whose deliverable is a Catala export.** `l4 export catala` refuses a section
 `GIVEN` read by anything other than the exported decision itself, so the delegating twin does not
 rescue you there unless every delegating rule is `@export`. The parser elaborates a section `GIVEN`
 into a 0-ary `ASSUME` at the head of its section (`jl4-core/src/L4/Names.hs:61-65`), and the
@@ -704,19 +704,19 @@ exported decision's own lowering (`jl4-core/src/L4/Catala/Lower.hs:1677-1683`, s
 The refusal reads:
 
 ```
-l4 catala: cannot compile these decisions to Catala:
+l4 export catala: cannot compile these decisions to Catala:
   - in `the rank of the teacher`: ASSUMEd input `the teacher` is only readable inside an
     @export decision's scope (where it becomes a scope `input`); pass it to this helper as
     a parameter instead
 ```
 
-Marking the helper `@export` too does lift it, and the Catala that comes out is correct — the binder
+Marking the helper `@export` too does lift it, and the Catala that comes out is correct — the section GIVEN
 becomes an `input` on every scope and the caller threads it. The price is one published scope per
-rule that reads the binder, where you wanted a helper. So this is a cost, not a wall; on a heading
+rule that reads the input, where you wanted a helper. So this is a cost, not a wall; on a heading
 with ten rules under it, it is a large one.
 
 That is ruled, not accidental: `specs/todo/IMPLICIT-PROPS-DESIGN.md` § 11.10 (**R10**, ruled
-2026-09-04) moves the backends onto the discharged AST, where the binder is an ordinary parameter
+2026-09-04) moves the backends onto the discharged AST, where the section GIVEN is an ordinary parameter
 and the refusal cannot arise. It is not yet built. Until it is, a module you will export to Catala
 is one to write with rule `GIVEN`s.
 

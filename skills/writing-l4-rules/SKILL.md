@@ -73,7 +73,7 @@ DECLARE Driver HAS
     `age`            IS A NUMBER
     `years licensed` IS A NUMBER
     `accident count` IS A NUMBER
-    `has tickets`    IS A BOOLEAN
+    `ticketed`    IS A BOOLEAN
 ```
 
 Records can declare **computed fields** (derived attributes) with `MEANS`; see [references/gotchas.md](references/gotchas.md) and <https://legalese.com/l4/reference/types/DECLARE.md>.
@@ -90,7 +90,7 @@ GIVEN driver IS A Driver
 GIVETH A RiskCategory
 DECIDE `assess risk` driver IS
     CONSIDER driver's `accident count`
-    WHEN 0 THEN IF driver's `has tickets`
+    WHEN 0 THEN IF driver's `ticketed`
                 THEN MediumRisk
                 ELSE LowRisk
     WHEN 1 THEN MediumRisk
@@ -145,6 +145,85 @@ DECIDE `coverage applies` IF
 
 `§`, `§§`, `§§§`, etc. mark sections — they are structural, not comments. Titles containing spaces, numbers, or punctuation must be backtick-quoted (`` §§ `1.2 Definitions` ``). See [references/gotchas.md](references/gotchas.md).
 
+#### Statutory tables: generate the layout, do not type it
+
+A rate table, a fee schedule, a salary scale — a source table with many columns
+produces very wide L4 if written the obvious way, and wide lines are what make an
+encoding unreviewable against the statute it mirrors.
+
+**What the printed table already gets right.** A statute prints its headings once
+and repeats nothing else: every mark on the page is a figure that matters.
+Encoded the obvious way, one row of a nine-column scale runs to 320 characters,
+of which the nine figures that vary are the smallest part and the hardest to
+find. The aim is to give the encoding back the shape the source had — the
+headings said once, the repetition reduced to whitespace, and a reviewer checking
+one row against the printed table reading only what that row actually says. That
+is Tufte's data-ink ratio applied to source.
+
+Three things get you there, and they are **separate levers that are easy to
+confuse**:
+
+| lever                        | what it actually buys                                                                                                                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| positional `OF` construction | **the width.** Measured on one row of a real 36×9 salary table: `WITH … IS …` 320 characters → `OF` 184                                                                      |
+| a ruler comment              | the column names, written **once** instead of on every row                                                                                                                   |
+| ditto `^`                    | **not width — ink.** A `^` is padded to the width of the token it replaces, so it cannot shorten a line. What it removes is repetition, so the eye lands only on what varies |
+
+Reach for `OF` when a row is too wide, and for ditto when a row is too noisy.
+They are not substitutes.
+
+```l4
+DECLARE `salary row` HAS `at rank 1` IS A NUMBER
+                         `at rank 2` IS A NUMBER
+                         `at rank 3` IS A NUMBER
+
+GIVEN `the seniority` IS A NUMBER
+GIVETH A `salary row`
+`the salary row for` MEANS
+  --                                                rank 1,   rank 2,   rank 3
+  BRANCH IF `the seniority` AT MOST 1 THEN `salary row` OF  6_300,    6_300,    6_615
+         IF `the seniority` EQUALS  2 THEN ^            ^   6_426,    6_426,    6_747
+         IF `the seniority` EQUALS  3 THEN ^            ^   6_554.52, 7_046.11, 7_397
+         OTHERWISE                        `salary row` OF  0,        0,        0
+```
+
+**The ruler is load-bearing, not decoration.** With positional `OF` the rank is
+written down nowhere else.
+
+**Emit tables from a script; do not hand-align them.** Ditto resolves by exact
+column, so a row that is a few spaces out fails with `unexpected ,` and a caret
+pointing into the middle of the row — a diagnostic that never says "your columns
+are misaligned". Compute the column widths and the ruler in the same code that
+lays out the rows, so the ruler cannot drift when a column widens. The Ofek
+Hadash encoding does this in a 93-line helper, `source/_tablefmt.py`; see
+`legalese/canon`, `subjects/il/ofek-hadash-2008/encodings/legalese/`, whose
+`NOTES.md` §9 is the fullest write-up of this discipline, and §9.2 — "Ditto fails
+loudly when it hits nothing, and silently when it hits the wrong thing" — carries
+the failure modes with a separator-by-separator table.
+
+Three token-level traps bite immediately, all verified. The first two are loud;
+the third is not, which is what makes it worth reading twice.
+
+- **`AT MOST` is two tokens.** One `^` under it copies `AT` and the parser then
+  demands the rest — `unexpected ^`. In the table above `AT MOST` and `EQUALS`
+  are written out on every row deliberately.
+- **"The line above" means the previous _token-bearing_ line.** Blank lines and
+  comment-only lines are skipped, so the ruler comment above does not break the
+  rows beneath it. Any line with real tokens does become the new reference —
+  a `GIVETH` between two rules is the usual casualty.
+- **A backtick name dittoes whole, and answers with the wrong field.**
+  `` `at rank 2` `` cannot ditto from `` `at rank 1` ``: the caret copies the
+  earlier name entire, so the arm reads rank 1 for every rank, with **zero
+  errors**. On a salary table that is the wrong money. See
+  [references/gotchas.md](references/gotchas.md#the-ditto-operator-) for the
+  worked case.
+
+`l4 format` preserves ditto exactly — measured byte-identical on the real 36×9
+file, 79 carets in and 79 out. Note that ditto in the l4-ide corpus is less well
+trodden: no `.ep.golden` covers a generated table of this shape, so if you emit
+one into `jl4/examples/**` you are on untested ground and should read the golden
+you generate rather than blessing it.
+
 ### 5. Model obligations and deadlines
 
 When the source text says "must", "may", "shall not", or mentions a deadline, use a regulative rule. The skeleton:
@@ -152,7 +231,10 @@ When the source text says "must", "may", "shall not", or mentions a deadline, us
 ```
 PARTY   actor
 MUST    action                 -- or MAY / SHANT / DO
-WITHIN  deadline               -- NUMBER (often derived from a DATE/TIME/DATETIME)
+AFTER   opening [OF anchor]    -- optional: when the window OPENS — a NUMBER (duration) or a DATE; an early act is a nullity, reported
+WITHIN  deadline [OF anchor]   -- NUMBER (often derived from a DATE/TIME/DATETIME); anchor: THE JOIN | THE DEADLINE | THE ARMING | a NUMBER/DATE instant
+                               -- beside an AFTER, a bare WITHIN counts from the instant the window opened: AFTER 3 WITHIN 30 is [a+3, a+33]
+                               -- (or BEFORE date: the absolute closing edge; WITHIN takes a duration, BEFORE a date)
 HENCE   nextState              -- optional; consequence on success
 LEST    penaltyState           -- optional; consequence on failure
 ```
@@ -193,13 +275,13 @@ Both type names may be backticked multi-word names, as in `` GIVETH A DEONTIC `A
 
 Actions with fields are **enum constructors** — apply them to arguments like any function (`` `pay invoice` amt recipient ``). Don't use `WITH` inside a `MUST`/`MAY` action; `WITH` is for record construction, not enum constructors.
 
-**Write `BECAUSE "reason"` on every `LEST BREACH`.** The language accepts the bare `LEST BREACH` and `LEST BREACH BY <party>` too — that is why you will see all three spellings — but the reason string is what a trace prints back, and it is what a legal reviewer or a downstream system reads. A breach with no reason reports the failure without saying which clause failed.
+**Write `BECAUSE "reason"` on every `LEST BREACH`.** The language accepts the bare `LEST BREACH`, `LEST BREACH BY <party>` and `LEST BREACH BY LIST <party>, <party>` too — that is why you will see the other spellings — but the reason string is what a trace prints back, and it is what a legal reviewer or a downstream system reads. A breach with no reason reports the failure without saying which clause failed. (A list literal with nobody in it, `BY EMPTY`, is a check-time error.)
 
 **When the duty falls on a group, not one named party, use `EVERY`.** `PARTY` names one actor; `EVERY` binds the same obligation to every member of a list and gives you one place to hang the follow-on:
 
 ```l4
 EVERY Tenant t IN tenants          -- one obligation per tenant, all live at once
-    MUST   Sign (EXACTLY t)
+    MUST   Sign t
     WITHIN 14
     ONCE   ALL HAVE                -- the join line: fires once, at the last signature
     HENCE  `the tenancy begins`
@@ -210,11 +292,11 @@ Three things about it are non-obvious enough that a general-purpose model gets t
 
 1. **The group must be a list, given after `IN`.** Without it the rule parses and type-checks and then **refuses at run time** — so `l4 check` passing is not evidence it will run.
 2. **The join line is mandatory whenever there is a `HENCE` or `LEST`**, and picks the meaning: `ONCE ALL HAVE` fires once when the last member acts (a **barrier**); `UPON EACH` fires once per member as each acts (a **fork**). There is no default.
-3. **Write `EXACTLY t` in the action.** A bare `t` there is a fresh pattern name matching _anyone_, so a stranger's act would discharge the member's duty.
+3. **`t` in the action already refers to the member.** A bare name in an action pattern refers to whatever it names, if it names anything in scope — `t` is the quantifier's own variable, so `MUST Sign t` means the member signs. Only a name that names _nothing_ in scope (or only a field selector of the action's own record type) is a fresh wildcard. `EXACTLY t` still parses but is the deprecated spelling of the same reference; write plain `t`.
 
 Do **not** write `EVERY Tenant t WHO elem t tenants`: that is the pre-2026-09-08 spelling of the roll, deprecated, and it still runs with no warning of any kind. `WHO elem t xs` becomes `IN xs`; `WHO elem t xs AND p` becomes `IN xs WHO p`.
 
-Full treatment — `RAND`/`ROR` composition, `PROVIDED` guards, `EXACTLY` matching, `EVERY` and its join lines, recursive obligations, and `#TRACE` simulation — is in [references/regulative.md](references/regulative.md).
+Full treatment — `RAND`/`ROR` composition, `PROVIDED` guards, action-pattern reference and wildcard matching, `EVERY` and its join lines, recursive obligations, and `#TRACE` simulation — is in [references/regulative.md](references/regulative.md).
 
 ### 6. Validate with the `l4` CLI
 
@@ -268,12 +350,17 @@ gap as a dropped directive.
   `#EVALTRACE` evaluation traces as GraphViz (PNG (Portable Network Graphics) and SVG (Scalable Vector Graphics) output needs `-o`).
 - `l4 state-graph FILE` — extract regulative-rule state transition
   graphs as GraphViz DOT (its graph-description language).
-- `l4 export --to=dmn|dmn-md|bpmn FILE [--fidelity-report]` — write the
+- `l4 export dmn|dmn-md|bpmn FILE [--fidelity-report]` — write the
   module out as DMN (Decision Model and Notation) 1.3 in XML (Extensible Markup Language), dmnmd markdown, or BPMN (Business Process Model and Notation) 2.0 XML. The
   document goes to stdout (or `-o FILE`); `--fidelity-report` adds the
   list of what the target notation could not carry, to `FILE.fidelity.txt`
   beside `-o` or to stderr otherwise. A one-line tally of the losses is
   printed to stderr either way.
+- `l4 export FORMAT FILE` — the other notations: `openfisca`, `catala`,
+  `blawx`, `docassemble`, `yscript`. `l4 export --help` lists every format and
+  `l4 export FORMAT --help` its options. `l4 import blawx FILE` reads a Blawx
+  project back into L4. There is no top-level `l4 openfisca`, `l4 blawx` and
+  so on: each notation is a subcommand of `export` (or `import`).
 
 ### 7. Test with `#EVAL`, `#ASSERT`, `#TRACE`
 
@@ -283,7 +370,7 @@ gap as a dropped directive.
     `age`            IS 25
     `years licensed` IS 7
     `accident count` IS 0
-    `has tickets`    IS FALSE
+    `ticketed`    IS FALSE
 
 #EVAL   `assess risk` `Alice`
 #ASSERT `assess risk` `Alice` EQUALS LowRisk
@@ -412,7 +499,7 @@ which is assumed and takes 1 input of its own`. This one used to pass
 
 An `ASSUME` of **no** inputs is a value and stays publishable. The check follows
 every rule the export reaches, so hiding one behind a helper does not help. The
-typechecker and the `jl4-service` deploy both reject such bundles; `l4 blawx` is
+typechecker and the `jl4-service` deploy both reject such bundles; `l4 export blawx` is
 the exception and compiles them, because a Blawx interview asks a person for the
 answer rather than receiving it in a request.
 
@@ -571,10 +658,33 @@ makes sense inside another arm's branch.
 ### Record construction and access
 
 ```l4
-Person WITH `name` IS "Alice", `age` IS 30
+Person WITH `name` IS "Alice", `age` IS 30   -- named
+Person OF "Alice", 30                        -- positional, same value
 person's `name`
 application's employee's nationality   -- chaining
 ```
+
+**Two constructions, and the choice is a real one.** `WITH … IS …` names each
+field; `OF` supplies them positionally in `DECLARE` order. `OF` is dramatically
+narrower — on a nine-column row, 320 characters against 184 — which is what makes
+wide statutory tables reviewable.
+
+The cost is that **`OF` is silently order-dependent**. Swap two same-typed fields
+in the `DECLARE` and every call site is now wrong, with no diagnostic at all:
+
+```l4
+DECLARE Pay HAS base  IS A NUMBER      -- swap these two lines and
+                bonus IS A NUMBER      -- `Pay OF 5000, 200` still typechecks,
+                                       -- but base and bonus have traded places
+```
+
+Verified: the values silently exchange and `l4 run` reports zero errors. On a
+salary rule that turns pay into bonus.
+
+So: **`OF` for a table whose columns are inherently positional and which carries a
+ruler comment naming them; `WITH` for a record whose fields a reader has to tell
+apart by name.** Do not use `OF` on a record of mixed meaning just because it is
+shorter.
 
 **There are two spellings for a record spread over several lines, and both
 parse.** Fields on continuation lines may each be led by a comma, or carry no
@@ -607,14 +717,19 @@ A directive is one line. Continuing an `#ASSERT` onto a second line that begins
 `EQUALS` is a parse error. The two exceptions: `#ASSERT REFUSED e` may put its
 `BECAUSE "…"` on the next line, and `#TRACE … WITH` takes its events on the
 lines that follow. Output is not always source: `#EVAL` prints an applied
-constructor with an `OF` that never appears in a file (`` `the levy is` OF 200 ``,
-`` LEFT OF `x` ``), so do not paste printed values back in as they are.
+function with an `OF` that you would not have written (`` `the levy is` OF 200 ``,
+`` LEFT OF `x` ``), so do not assume a printed value can be pasted back in.
+
+The exception is worth knowing, because it is the common case in a table: a
+**record constructor** prints in the positional `OF` form and that form _is_
+valid source. `#EVAL Pay OF 5000, 200` prints `Pay OF 5000, 200`, and pasting
+that back typechecks and evaluates. See [Record construction and access](#record-construction-and-access).
 
 ### Annotations
 
 - `@desc` — human-readable description behind any line or `GIVEN` parameter (internal unless paired with `@export`)
 - `@export` — atop the `GIVEN`. mark a function for deployment
-- `@nlg` — natural-language generation hint
+- `@nlg` — natural-language generation hint. A rule's goes on its own line immediately ABOVE the definition — trailing the definition line never reaches the rule, and can silently land on the next `DECLARE`. A parameter's trails its own line; a record field's goes on its own line BELOW the field. Takes a language subtag and several per name — `@nlg:he`, `@nlg:en` — selected with `l4 nlg --lang he` or `l4 render --lang he`, and `@lang he` sets what an untagged one means. [gotchas](references/gotchas.md) has the measured placements and what the tag does not buy.
 - `@ref`, `@ref-src`, `@ref-map` — cross-reference to a legal source
 
 ### Imports
@@ -655,7 +770,7 @@ GIVETH A BOOLEAN
 isEligible p MEANS p's citizen && p's years >= 5 && !p's disqualified
 ```
 
-**Use backtick identifiers liberally.** `` `the applicant` `` not `applicant`. `` `has valid identification` `` not `hasValidID`.
+**Use backtick identifiers liberally.** `` `the applicant` `` not `applicant`. `` `valid identification` `` not `hasValidID`.
 
 ---
 

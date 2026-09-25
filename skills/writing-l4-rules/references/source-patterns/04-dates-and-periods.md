@@ -11,7 +11,7 @@ One area of the phrasebook. The index, the preamble and the other ten areas are 
 
 > `"ISA s 5: the Act distributes the estates of those dying intestate after 2 June 1967."`
 >
-> — `jl4/examples/legal/sg-succession/sg-isa.l4:420`
+> — `jl4/examples/canon/sg/succession/sg-isa.l4:420`
 
 **It is doing** fixing a boundary in time. Before it, this Act has nothing to say — but **something
 else does**, and the law provides for the handover: savings and transitional provisions reach back
@@ -68,7 +68,7 @@ for commencement.
 rule does to it, and [entry 11.5](11-when-the-encoding-cannot-answer.md#e11-5) for the different
 case of scope the encoding deliberately does not cover.
 
-**One documented near-exception.** `jl4/examples/legal/regcf/regcf.l4:143-154` names its
+**One documented near-exception.** `jl4/examples/canon/us/regcf/regcf.l4:143-154` names its
 pre-commencement arm for a refusal, and says out loud why: the taxonomy puts "not in force" in the gate row, no gate
 construct exists, and there is no figure to return. The site itself is still an `ASSUME` — the
 rewrite to `REFUSE` is drafted, unlanded. Cite it as an exception, never as the pattern.
@@ -86,7 +86,7 @@ building the comparison (and the `Date` month-subtraction footgun, which `YMD` d
 
 > `s 18(5) — "Nothing in this section shall affect any law by which special provision is made regarding the estates of persons of a particular religion or race."`
 >
-> — `jl4/examples/legal/sg-succession/cleanroom-2026-08/probate-administration-act.l4:1600`
+> — `jl4/examples/canon/sg/succession/cleanroom/probate-administration-act.l4:1600`
 
 **It is doing** leaving some other law, or some accrued right, untouched. It is the mechanism by
 which the law itself reaches a period or a class that the rule in front of you does not cover.
@@ -134,7 +134,7 @@ for `UNLESS` and named defeaters, which is the same move at limb scale.
 > `s 28(1) — "Upon the grant of any probate or letters of administration, the grantee shall take an oath in the prescribed form …"`, encoded with `WITHIN 14`
 >
 > — the shape at [entry 2.1](02-conditions-and-logic.md#e2-1), from
-> `jl4/examples/legal/sg-succession/cleanroom-2026-08/probate-administration-act.l4:2715`
+> `jl4/examples/canon/sg/succession/cleanroom/probate-administration-act.l4:2715`
 
 **It is doing** fixing a period, in a unit — days, months, business days — that the statute states
 and L4 does not record. `WITHIN` takes a bare `NUMBER` on the same nameless timeline as the `AT`
@@ -207,8 +207,9 @@ the result is the **residual obligation**, not a breach. **Not** a `#TRACE` with
 altogether — that is a parse error, `unexpected end of input / expecting %, WITH, or space token`.
 
 **Not** a unit written into the deadline. There is no unit keyword to append: `WITHIN 14 days` does
-**not** parse as "fourteen days" — `days` is an ordinary identifier, so the line is read as applying
-a function to `14`, and the file fails to check with
+**not** parse as "fourteen days" — `days` is an ordinary identifier. In a file with no imports and no
+other mixfix definition, the line is read as applying a function to `14`, and the file fails to
+check with
 
 ```
 I could not find a definition for the identifier
@@ -220,12 +221,16 @@ which I have inferred to be of type:
   FUNCTION FROM NUMBER TO NUMBER
 ```
 
-Measured on the section-`GIVEN` binary, exit 1. The anchored form
+Measured on the section-`GIVEN` binary, exit 1, on a file that imported nothing. With any mixfix
+operator in scope — `IMPORT prelude` is enough — the parser accepts only operator words it knows,
+and the same line stops earlier, in the parser, with `unexpected days` (re-measured 2026-09-15).
+Either way the fix is the same. The anchored form
 [regulative.md](../regulative.md) shows under "`WITHIN` — deadlines" —
-`` WITHIN 5 days OF `order confirmation` `` — does not parse either: `unexpected OF`, exit 1,
-measured on the same binary. **Write the bare number.** A `currency` library ships, but no unit
-library does. The discipline is: one unit per file, stated once at the top, and every `WITHIN` and
-every `AT` on it.
+`` WITHIN 5 days OF `order confirmation` `` — was a parse error (`unexpected OF`, exit 1) on that
+binary; since 2026-09-15 the `OF` parses as the deadline's anchor, and the line fails the same
+way `WITHIN 14 days` does, on `days`, until `days` is defined. **Write the bare number.** A
+`currency` library ships, but no unit library does. The discipline is: one unit per file, stated
+once at the top, and every `WITHIN` and every `AT` on it.
 
 **See** [regulative.md](../regulative.md), "`WITHIN` — deadlines", and
 [entry 3.2](03-quantities-and-calculation.md#e3-2) for the same problem in money.
@@ -324,7 +329,7 @@ encoding stops to reason about one word of it:
 -- birth date >= 1983-01-01 (taken here, and the settled understanding).
 ```
 
-— `jl4/examples/legal/bna/bna.l4:73-76`
+— `jl4/examples/canon/uk/bna-1981/bna.l4:73-76`
 
 **It is doing** two separate things that both look like arithmetic. First, saying whether the
 boundary day is inside the period: "on or before" and "not later than" include it, "before" does
@@ -404,7 +409,7 @@ endpoint of a window measured in years.
 `father or mother settled in the United Kingdom or the territory of birth at the time of the birth`    IS A BOOLEAN
 ```
 
-— `jl4/examples/legal/bna/bna.l4:132-133`
+— `jl4/examples/canon/uk/bna-1981/bna.l4:132-133`
 
 **It is doing** freezing a fact. Nationality, residence, marital status, solvency, share ownership,
 capacity — all of these change, and the rule asks about the value one of them had at an instant that
@@ -481,7 +486,7 @@ GIVETH A BOOLEAN
     `RULES EFFECTIVE DATE` AT LEAST amendment
 ```
 
-— `jl4/examples/legal/regcf/regcf.l4:130-133`
+— `jl4/examples/canon/us/regcf/regcf.l4:130-133`
 
 **It is doing** naming the third clock. There are three, they move independently, and confusing them
 produces answers that are confidently wrong rather than obviously wrong:
@@ -564,7 +569,7 @@ rule does. The corpus records one of the second kind at length:
 -- consequential edit in Reg CF's history for an individual investor.
 ```
 
-— `jl4/examples/legal/regcf/regcf.l4:387-392`
+— `jl4/examples/canon/us/regcf/regcf.l4:387-392`
 
 **It is doing** replacing one rule with another as of a date, while leaving both in force for their
 own periods. The encoding does not choose between them; it holds both and selects on the rule-version
@@ -727,8 +732,8 @@ harder to transpose than `Date day month year`, and it fails loudly on a date th
 @ref § 227.203(b)(3) — "within five business days from the date on which the issuer becomes eligible"
 ```
 
-— `jl4/examples/legal/regcf/denovo/regcf-denovo.l4:2026`; the corpus binds the number once, as
-`` `business days to file Form C-TR` MEANS 5 `` (`jl4/examples/legal/regcf/regcf.l4:239`)
+— `jl4/examples/canon/us/regcf/cleanroom/regcf-denovo.l4:2026`; the corpus binds the number once, as
+`` `business days to file Form C-TR` MEANS 5 `` (`jl4/examples/canon/us/regcf/regcf.l4:239`)
 
 **It is doing** counting against a calendar that the instrument does not print. "Business day"
 almost always means "not a Saturday, not a Sunday, and not a public holiday **in a named place**",

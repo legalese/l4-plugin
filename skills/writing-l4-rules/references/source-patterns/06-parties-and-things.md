@@ -13,7 +13,7 @@ a wrong answer, that is said, because a shape that type-checks is the more dange
 
 **If the source says**
 
-> `` PARTY   `The Borrower` ``, `` MUST    `pay monthly installment to` ``, `` EXACTLY `The Lender` ``
+> `` PARTY   `The Borrower` ``, `` MUST    `pay monthly installment to` ``, `` `The Lender` ``
 >
 > — `jl4/examples/legal/promissory-note.l4:90-92`, the borrower's payment obligation. The comment
 > beside it: "This function/action is defined in the prelude and expects an object of type Lender
@@ -82,7 +82,7 @@ passive "may be granted" is a boolean, not a permission.
 
 > `DECLARE Constitution HAS` … `` `express permission for the entity's activities to be directed or otherwise controlled by a Minister` IS A BOOLEAN -- 5(2), limb (a), direction mode ``
 >
-> — `jl4/examples/legal/charities-cleanroom/charity-test.l4:146-154`, where Article 5(2)'s "three
+> — `jl4/examples/canon/je/charities-2014/charity-test.l4:146-154`, where Article 5(2)'s "three
 > listed persons x two modes of involvement" becomes six fields, each tagged with the limb it came
 > from.
 
@@ -236,9 +236,9 @@ fills.
 
 > `-- "13.--(1) Where -- (a) no executor is appointed by a will; (b) the executor or all the executors appointed by will are legally incapable of acting as such, or have renounced the right to act as such; ..."`
 >
-> — `jl4/examples/legal/sg-succession/sg-paa.l4:472-474`, Probate and Administration Act 1934
+> — `jl4/examples/canon/sg/succession/sg-paa.l4:472-474`, Probate and Administration Act 1934
 > s 13(1). Limb (b) is encoded at `:498` as
-> ``all (GIVEN p YIELD p's `legally incapable of acting as such` OR p's `has renounced the right to such grant`) executors``.
+> ``all (GIVEN p YIELD p's `legally incapable of acting as such` OR p's `renounced the right to such grant`) executors``.
 
 **It is doing** quantifying over a collection whose size the drafter does not know: every executor,
 each of the governors, all of its purposes.
@@ -248,12 +248,12 @@ each of the governors, all of its purposes.
 ```l4
 DECLARE Executor HAS
     `name`                                  IS A STRING
-    `has renounced the right to such grant` IS A BOOLEAN
+    `renounced the right to such grant` IS A BOOLEAN
 
 GIVEN executors IS A LIST OF Executor
 GIVETH A BOOLEAN
 `s 13(1)(b) -- every executor appointed by the will has renounced` executors MEANS
-    all (GIVEN p YIELD p's `has renounced the right to such grant`) executors
+    all (GIVEN p YIELD p's `renounced the right to such grant`) executors
 ```
 
 **Know what the empty list does.** A universal over nothing is `TRUE`:
@@ -264,7 +264,7 @@ GIVETH A BOOLEAN
 
 passes. That is the standard reading of a universal, and it is the reading `all` implements — but it
 is a reading, and where it matters the corpus records the choice rather than letting it happen
-silently: `jl4/examples/legal/charities-cleanroom/charity-test.l4:554-567` registers it as an
+silently: `jl4/examples/canon/je/charities-2014/charity-test.l4:554-567` registers it as an
 ambiguity, Article 5(1)(a) applied to an entity with no purposes at all, and pins the behaviour with
 a scenario so a later change to `all` is caught. Do the same: if "all of its purposes are
 charitable" ought to fail for an entity with no purposes, say so and add the guard.
@@ -298,7 +298,7 @@ rather than a list.
 
 > ``OR any (GIVEN q YIELD `a survivor stands in the line of` q) (p's `issue`)``
 >
-> — `jl4/examples/legal/sg-succession/sg-isa.l4:149`, the recursive test for whether any descendant
+> — `jl4/examples/canon/sg/succession/sg-isa.l4:149`, the recursive test for whether any descendant
 > of a person survived the intestate.
 
 **It is doing** the existential half of the same job: the rule fires if the property holds of at
@@ -340,7 +340,7 @@ row + enums + membership via `any`".
 --       silently disagree — and the four Acts join across records constantly
 ```
 
-> — `jl4/examples/legal/sg-succession/cleanroom-2026-08/family-domain.l4:54-57`, with the three
+> — `jl4/examples/canon/sg/succession/cleanroom/family-domain.l4:54-57`, with the three
 > provisions that force the point: a Wills Act section that must know the witness's spouse is the
 > donee, a Guardianship of Infants Act section that must know two appointees are guardians of the
 > same infant, a Probate and Administration Act section that must know the executor who died is one
@@ -355,7 +355,7 @@ own has nothing to cross-reference with.
 ```l4
 DECLARE Person HAS
     `the reference for this person`   IS A STRING   -- equality of THIS field is identity
-    `is a beneficiary under the will` IS A BOOLEAN
+    `a beneficiary under the will` IS A BOOLEAN
 
 GIVEN a IS A Person
       b IS A Person
@@ -392,7 +392,7 @@ structurally even when the sets are extensionally equal.
 
 > `-- "(2) A prior right to a grant under subsection (1) shall belong to the following persons in the following order: (a) a universal or residuary legatee; ... (e) a creditor of the deceased."`
 >
-> — `jl4/examples/legal/sg-succession/sg-paa.l4:541-547`, Probate and Administration Act 1934
+> — `jl4/examples/canon/sg/succession/sg-paa.l4:541-547`, Probate and Administration Act 1934
 > s 13(2), encoded at `:557` as `` `the section 13(2) rank of` p `` and at `:573` as
 > `` `those with a prior right under section 13(2) in` a ``.
 
@@ -499,7 +499,7 @@ must be backticked, and that bare `EQUALS` between sets is a deliberate ambiguit
 
 > `DECLARE Actor IS ONE OF` / `Issuer` / `Intermediary` / `Investor` / `Purchaser`
 >
-> — `jl4/examples/legal/regcf/regcf.l4:89-93`. Not one human is named; the cast is the roles the
+> — `jl4/examples/canon/us/regcf/regcf.l4:89-93`. Not one human is named; the cast is the roles the
 > Code of Federal Regulations part creates.
 
 **It is doing** conferring a power on an **office**. Who holds it today is irrelevant to the rule and

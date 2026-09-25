@@ -11,7 +11,7 @@ One area of the phrasebook. The index, the preamble and the other ten areas are 
 
 > `PAA s 2 — "court" means the General Division of the High Court or a Family Court`
 >
-> — `jl4/examples/legal/sg-succession/cleanroom-2026-08/family-domain.l4:172`
+> — `jl4/examples/canon/sg/succession/cleanroom/family-domain.l4:172`
 
 **It is doing** The drafter has written the right-hand side down, so the meaning is settled for
 every reader of the Act. It is not a fact about the case in front of you.
@@ -54,7 +54,7 @@ halves, and do not let the prohibition talk you out of the role:
 --    licence under section 6.
 
 DECLARE Applicant HAS
-    `has applied for a licence under section 6` IS A BOOLEAN
+    `applied for a licence under section 6` IS A BOOLEAN
     `age in years`                              IS A NUMBER
 
 -- The DEFINITIONAL half: the test the drafter wrote down, asked of any person.
@@ -63,7 +63,7 @@ GIVEN `the person` IS AN Applicant
 GIVETH A BOOLEAN
 `s 5 — the person is the applicant` `the person` MEANS
         "a person who has applied for a licence under section 6"
-    ... `the person`'s `has applied for a licence under section 6`
+    ... `the person`'s `applied for a licence under section 6`
 
 § `Part 2 — Licences`
     -- The ROLE half: which person this run is about. "In this Part" is the scope.
@@ -91,7 +91,7 @@ exercisable on any case; the Part's rule is exercised as [entry 11.9](11-when-th
 
 > `s 28(1) — "Upon the grant of any probate or letters of administration, the grantee shall take an oath in the prescribed form, faithfully to administer the estate and to account for the same."`
 >
-> — `jl4/examples/legal/sg-succession/cleanroom-2026-08/probate-administration-act.l4:2715`
+> — `jl4/examples/canon/sg/succession/cleanroom/probate-administration-act.l4:2715`
 
 **It is doing** naming a role that each case fills differently. The Part opens by naming "the
 grantee" and then talks about him for twenty sections without introducing him again — the role is
@@ -149,11 +149,11 @@ subtree, and a rule that reaches two at once is an error naming both.
 
 ## 1.3 "a person ('P')", "(the 'Purchaser')" — the parenthetical label
 
-**If the source says** — this device does **not** occur in the encoded corpus. Checked across all 26
-files under `jl4/examples/legal/`: no `("P")`, no `(the "Purchaser")`, no `(hereinafter …)`, in
+**If the source says** — this device does **not** occur in the encoded corpus. Checked across all 35
+files under `jl4/examples/legal/` and `jl4/examples/canon/` (measured 2026-09-16): no `("P")`, no `(the "Purchaser")`, no `(hereinafter …)`, in
 quoted text or in comments. Modern United Kingdom drafting uses it constantly, and the encoded slice
 of the British Nationality Act 1981 does not reach one. The nearest corpus analogue is the role
-parameter `GIVEN person IS A PersonProfile` (`jl4/examples/legal/bna/bna.l4:257`, and 28 more
+parameter `GIVEN person IS A PersonProfile` (`jl4/examples/canon/uk/bna-1981/bna.l4:257`, and 28 more
 sites).
 
 **It is doing** exactly what [entry 1.2](#e1-2) does, with a shorter name. The parenthetical letter is a role
@@ -193,7 +193,7 @@ renamed role breaks that for no gain.
 
 > `s 6(6) — "For the purposes of this section, "trust corporation" means the Public Trustee or a corporation licensed as a trust company under the Trust Companies Act 2005."`
 >
-> — `jl4/examples/legal/sg-succession/cleanroom-2026-08/probate-administration-act.l4:222`
+> — `jl4/examples/canon/sg/succession/cleanroom/probate-administration-act.l4:222`
 
 and then, twenty-two sections later, uses "a trust company" unqualified for a class that is **not**
 the same (`:2715`).
@@ -325,7 +325,7 @@ That is the mistake the corpus made and reverted.
 
 > `"(4) In this Law, unless the context otherwise requires, \"constitution\" in relation to an entity means –"`
 >
-> — `jl4/examples/legal/charities-cleanroom/charity-test.l4:81`
+> — `jl4/examples/canon/je/charities-2014/charity-test.l4:81`
 
 **It is doing** two very different jobs under one phrase. As boilerplate on a definitions section it
 usually has no operative effect and rides as inert prose beside the definition. But where a
@@ -334,7 +334,7 @@ and belongs to whoever runs the rules.
 
 **Write** the reading as a parameter, and declare it once for the whole encoding as a section
 `GIVEN`. "Rather than pick one and present it as the text, the encoding takes the reading as a
-parameter" (`jl4/examples/legal/regcf/denovo/regcf-denovo.l4:92-93`).
+parameter" (`jl4/examples/canon/us/regcf/cleanroom/regcf-denovo.l4:92-93`).
 
 ```l4
 § `Regulation Crowdfunding`
@@ -458,14 +458,14 @@ file cannot show it:
 -- it up and answer it, so it is a fact about the case: a field.
 DECLARE Applicant HAS
     `age in years`                          IS A NUMBER
-    `has been disqualified under section 9` IS A BOOLEAN
+    `been disqualified under section 9` IS A BOOLEAN
 
 @ref Licensing Act s 6(1)
 GIVEN `the person` IS AN Applicant
 GIVETH A BOOLEAN
 `s 6(1) — a licence may be granted to` `the person` MEANS
         `the person`'s `age in years` AT LEAST 18
-    AND NOT `the person`'s `has been disqualified under section 9`
+    AND NOT `the person`'s `been disqualified under section 9`
 
 -- READING 2 — s 9 is a RULE, with its own conditions, that this encoding does
 -- not contain. Nobody can supply its answer, so the honest shape is a refusal.
@@ -491,18 +491,18 @@ three assertions below are satisfied:
 ```l4
 `an applicant aged 25 who is not disqualified` MEANS Applicant WITH
     `age in years`                          IS 25
-    `has been disqualified under section 9` IS FALSE
+    `been disqualified under section 9` IS FALSE
 
 `an applicant aged 17` MEANS Applicant WITH
     `age in years`                          IS 17
-    `has been disqualified under section 9` IS FALSE
+    `been disqualified under section 9` IS FALSE
 
 #ASSERT `s 6(1) — a licence may be granted to` `an applicant aged 25 who is not disqualified`
 #ASSERT REFUSED `s 6(1) — a licence may be granted to, deciding s 9 here` `an applicant aged 25 who is not disqualified`
 #ASSERT NOT `s 6(1) — a licence may be granted to, deciding s 9 here` `an applicant aged 17`
 ```
 
-**Not** a field named for a rule. `` `has been disqualified under section 9` `` is defensible
+**Not** a field named for a rule. `` `been disqualified under section 9` `` is defensible
 because disqualification is a status a register holds; `` `satisfies section 9` `` on a section that
 computes something would be a promise the caller cannot keep.
 
@@ -626,8 +626,8 @@ clause runs to a table rather than a list.
 
 > `(2) _Funding portal_ means a broker acting as an intermediary in a transaction involving the offer or sale of securities in reliance on section 4(a)(6) of the Securities Act …, that does not: (i) Offer investment advice or recommendations; (ii) Solicit purchases, sales or offers to buy the securities displayed on its platform; …`
 >
-> — 17 CFR (Code of Federal Regulations) 227.300(c)(2), in the repository at
-> `jl4/examples/legal/regcf/denovo/source/part227.txt:458`
+> — 17 CFR (Code of Federal Regulations) 227.300(c)(2), at
+> `source/part227.txt:458` of the `us/regcf` subject in `legalese/canon`
 
 The same instrument's sibling definition carries the other common form, an exception rather than a
 condition: "except that any person … whose functions are solely clerical or ministerial shall not be
@@ -646,7 +646,7 @@ sub-paragraph, tagged with its own number:
 § `Regulation Crowdfunding`
 
 DECLARE IntermediaryProfile HAS
-    `is a broker acting as an intermediary in a section 4(a)(6) transaction` IS A BOOLEAN
+    `a broker acting as an intermediary in a section 4(a)(6) transaction` IS A BOOLEAN
     `offers investment advice or recommendations`                            IS A BOOLEAN
     `solicits purchases, sales or offers to buy the securities displayed on its platform` IS A BOOLEAN
     `holds, manages, possesses, or otherwise handles investor funds or securities`        IS A BOOLEAN
@@ -655,7 +655,7 @@ DECLARE IntermediaryProfile HAS
 GIVEN intermediary IS AN IntermediaryProfile
 GIVETH A BOOLEAN
 DECIDE `the intermediary is a funding portal` intermediary IF
-        intermediary's `is a broker acting as an intermediary in a section 4(a)(6) transaction`
+        intermediary's `a broker acting as an intermediary in a section 4(a)(6) transaction`
     AND NOT "(i)"   ... intermediary's `offers investment advice or recommendations`
     AND NOT "(ii)"  ... intermediary's `solicits purchases, sales or offers to buy the securities displayed on its platform`
     AND NOT "(iv)"  ... intermediary's `holds, manages, possesses, or otherwise handles investor funds or securities`
@@ -663,7 +663,7 @@ DECIDE `the intermediary is a funding portal` intermediary IF
 
 _(Checked on the release binary, exit 0, no errors; limb (iii) is elided above for length, which is
 why the tags run (i), (ii), (iv).)_ This is the corpus's own shape, at
-`jl4/examples/legal/regcf/denovo/regcf-denovo.l4:2210-2218`, where all four limbs are written
+`jl4/examples/canon/us/regcf/cleanroom/regcf-denovo.l4:2210-2218`, where all four limbs are written
 against fields declared in the positive at `:869-873`, under a comment calling them the four
 negative limbs of "funding portal".
 
@@ -710,7 +710,7 @@ on a section rather than part of a definition.
 
 > `"charitable purpose" has the meaning given by Article 6;` … `"constitution" has the meaning given by Article 2(4);`
 >
-> — `jl4/examples/legal/charities-cleanroom/charity-test.l4:66-71`, carrying Article 1 of the
+> — `jl4/examples/canon/je/charities-2014/charity-test.l4:66-71`, carrying Article 1 of the
 > Charities (Jersey) Law 2014
 
 **It is doing** deferring. The interpretation section is not defining anything; it is telling you
@@ -772,7 +772,7 @@ _(Checked on the release binary, exit 0, no errors, with an `#ASSERT` over the c
 satisfied. The adoption field's name is shortened here; the corpus carries the whole phrase,
 including the three jurisdictions, for the reason its own note gives.)_ The three rule names are the
 corpus's own:
-`jl4/examples/legal/sg-succession/cleanroom-2026-08/intestate-succession-act.l4:194`,
+`jl4/examples/canon/sg/succession/cleanroom/intestate-succession-act.l4:194`,
 `probate-administration-act.l4:417`, and the cross-check at `family-cases.l4:1016-1019`, whose
 comment says why it exists — "there are two texts of one definition. What a composition can do is
 assert that they still say the same thing, in one expression that fails if either is edited alone".
@@ -866,7 +866,7 @@ GIVETH A BOOLEAN
 _(Checked on the release binary, exit 0, no errors;
 `` #ASSERT `s 36(1)(a) — …` `a claim in tort` `` and the `#ASSERT NOT` for an unscheduled proceeding
 are both satisfied. `Schedule item 2` is elided above for length.)_ The corpus does this at
-`jl4/examples/legal/sg-succession/sg-paa.l4:1582-1591`, where the Probate and Administration Act's
+`jl4/examples/canon/sg/succession/sg-paa.l4:1582-1591`, where the Probate and Administration Act's
 Second Schedule is eight named items gathered into one `LIST`, each carrying its `paragraph` and its
 `text` — kept at its own number, in the file's words, "because the app shows the Schedule as the
 Schedule reads" (`:1572-1573`).
@@ -967,7 +967,7 @@ find it: a `#EVAL` or `#ASSERT` on every defined term you actually use, not a cl
 
 **If the source says** an interpretation section for the whole instrument and, later, a Part that
 redefines one of its words for itself. Section 2 of the Probate and Administration Act 1934 carries
-"the three definitions" for the Act (`jl4/examples/legal/sg-succession/cleanroom-2026-08/family-domain.l4:1497`),
+"the three definitions" for the Act (`jl4/examples/canon/sg/succession/cleanroom/family-domain.l4:1497`),
 while s 6(6) confines a definition of "trust corporation" to s 6 alone
 (`probate-administration-act.l4:222`; entry [1.4](#e1-4)).
 
