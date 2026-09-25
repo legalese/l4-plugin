@@ -22,13 +22,19 @@ copied out of [legalese/l4-ide](https://github.com/legalese/l4-ide) by
 `etc/build-plugin-bundle.mjs`; edits made here are lost on the next build.
 Change the skill in l4-ide at `.claude/skills/writing-l4-rules/` and rebuild.
 
-Generated from l4-ide `3cf8f64a1e57`.
+Generated from l4-ide `3cf8f64a1e57`, then **hand-synced on 2026-09-25 to l4-ide
+`7b937645548b`** (`unstable` after legalese/l4-ide#490, #478 and #489), because
+`etc/build-plugin-bundle.mjs` is not on l4-ide `unstable` and could not be run.
+The hand-sync followed this page's own rules: the skill copied whole, every file
+its text cites carried at its l4-ide path (the standard library excepted), and
+files it no longer cites that have left l4-ide dropped. The next real build
+supersedes it.
 
 ## What is here, and why
 
 `skills/writing-l4-rules/` is the skill. Everything else is the material the
 skill **cites**: it teaches by worked example, naming files like
-`jl4/examples/legal/regcf/regcf.l4` in its prose rather than restating them.
+`jl4/examples/canon/us/regcf/regcf.l4` in its prose rather than restating them.
 Those citations are carried at their original repo-relative paths, so each one
 resolves against this bundle root exactly as it resolves against the l4-ide
 root. Nothing in the skill text was rewritten.
@@ -47,9 +53,9 @@ than itself does not report a version mismatch; it fails as cascading
 | | |
 |---|---|
 | skill | 22 files |
-| cited material | 44 files |
+| cited material | 51 files |
 | cited but NOT carried | 5 standard-library files |
-| bundle | 4.75 MB |
+| bundle | 5.09 MB |
 | the repo it came from | 289 MB packed |
 
 That last row is the reason this bundle exists: installing the plugin used to

@@ -22,7 +22,7 @@ clean answer rather than a diagnostic.
 
 > `-- AMBIGUITY A3 — 6(1)(p), "any other purpose that may reasonably be regarded as analogous to any of the purposes listed in sub-paragraphs (a) to (o)".` … `-- TAKEN: (i). "may reasonably be regarded" is the language of judgement, and 6(2)(f) is expressed as one instance ..., not as an exhaustive definition. Encoded as an input judgement rather than a computed one: this module records WHO decided the analogy, it does not decide it. That is a real limit on what this formalisation can verify and it is stated here rather than papered over.`
 >
-> — `jl4/examples/legal/charities-cleanroom/charity-test.l4:339-350`, on the Charities (Jersey)
+> — `jl4/examples/canon/je/charities-2014/charity-test.l4:339-350`, on the Charities (Jersey)
 > Law 2014.
 
 **It is doing** leaving a category **open**. A closing limb like "any other purpose analogous to the
@@ -135,7 +135,7 @@ permission.
 
 > `` `the intermediary has a reasonable basis for believing that the investor satisfies the investment limitations` IS A BOOLEAN ``
 >
-> — `jl4/examples/legal/regcf/regcf.l4:563`, a field of `IntermediaryArrangement`, read at `:603` as
+> — `jl4/examples/canon/us/regcf/regcf.l4:563`, a field of `IntermediaryArrangement`, read at `:603` as
 > the second limb of `` `the intermediary has discharged its investor-facing duties` ``.
 
 **It is doing** imposing a duty **on one party to have formed a view about another**. The subject of
@@ -190,7 +190,7 @@ distinction one level up.
 
 > `-- The Article 7 determination, as a record of what the determiner found and what the determiner did. Two of these fields are TRUTH-conditional (they can change whether the entity provides public benefit); four are PROCEDURAL (they record compliance with Article 7(2) and 7(3)(a), which bind the determiner's reasoning, not the entity's status).`
 >
-> — `jl4/examples/legal/charities-cleanroom/charity-test.l4:156-160`, above `DECLARE
+> — `jl4/examples/canon/je/charities-2014/charity-test.l4:156-160`, above `DECLARE
 PublicBenefitFinding`.
 
 **It is doing** two jobs the same sentence usually hides. A determination has a **content** (what was
@@ -246,7 +246,7 @@ record catches.
 
 > `-- "(4) Without prejudice to the generality of subsection (2) -- (a) letters of administration may be granted to the husband or widow or next of kin or any of them; (b) when such persons apply for letters of administration, it shall be in the discretion of the court to grant them to any one or more of such persons; ..."`
 >
-> — `jl4/examples/legal/sg-succession/sg-paa.l4:596-601`. The note at `:613-615`: "within rank 1,
+> — `jl4/examples/canon/sg/succession/sg-paa.l4:596-601`. The note at `:613-615`: "within rank 1,
 > s 18(4)(b) puts the choice squarely in the court's discretion, and this module does not pretend
 > otherwise."
 
@@ -301,7 +301,7 @@ residuates to `FULFILLED` rather than a breach, which is what makes it discretio
 
 > `-- "(3) The court or the registrar may for any sufficient reason increase or decrease the number of the sureties, or dispense with them, or reduce the amount of the bond."`
 >
-> — `jl4/examples/legal/sg-succession/sg-paa.l4:917-919`. The note at `:925-929`: "'ordinarily' is
+> — `jl4/examples/canon/sg/succession/sg-paa.l4:917-919`. The note at `:925-929`: "'ordinarily' is
 > doing the same work in s 29(2) and s 29(5): both state a default that s 29(3) lets the registrar
 > move. The encoding computes the default. It does not model s 29(3), because 'for any sufficient
 > reason' is a discretion and not a rule; a registrar's actual order overrides the number below."
@@ -361,9 +361,9 @@ must be exercised before the provision has any content at all.
 > "Where the Contractor works more than 160 hours in a month, the Company may, in its reasonable
 > opinion, reject any hours above 160."
 >
-> — drafted, not quoted; no instrument under `jl4/examples/legal/` combines the three in one
-> sentence. The nearest corpus witness is the registrar's power at
-> `jl4/examples/legal/sg-succession/sg-paa.l4:917-919`, treated at [8.6](#e8-6), which lacks the
+> — drafted, not quoted; no instrument under `jl4/examples/legal/` and `jl4/examples/canon/` combines the three in
+> one sentence. The nearest corpus witness is the registrar's power at
+> `jl4/examples/canon/sg/succession/sg-paa.l4:917-919`, treated at [8.6](#e8-6), which lacks the
 > deontic half because nobody is permitted to do anything by it.
 
 **It is doing** three separable things, and the whole difficulty of the entry is that a model reads

@@ -128,18 +128,18 @@ FALSE.
 DECLARE Occupier HAS
     name                                                  IS A STRING
     `is the landlord`                                     IS A BOOLEAN   -- (a)
-    `is the landlord's spouse, civil partner or cohabitant`  IS A BOOLEAN -- (b)
-    `is the landlord's parent`                            IS A BOOLEAN   -- (c)(i)
+    `the landlord's spouse, civil partner or cohabitant`  IS A BOOLEAN -- (b)
+    `the landlord's parent`                            IS A BOOLEAN   -- (c)(i)
     -- ... grandparent / sibling / child / grandchild ...
-    `is a child or grandchild of the landlord's partner`  IS A BOOLEAN   -- (d)
+    `a child or grandchild of the landlord's partner`  IS A BOOLEAN   -- (d)
     `is other`                                            IS A BOOLEAN   -- none of (a)-(d); NOT in the disjunction
 
 `is a qualifying occupier` occupier MEANS
         "(a) the landlord;"                  ... occupier's `is the landlord`
-    ..  "(b) the landlord's spouse ..."      ... occupier's `is the landlord's spouse, civil partner or cohabitant`
-    ..  "(c) the landlord's— (i) parent;"    ... occupier's `is the landlord's parent`
+    ..  "(b) the landlord's spouse ..."      ... occupier's `the landlord's spouse, civil partner or cohabitant`
+    ..  "(c) the landlord's— (i) parent;"    ... occupier's `the landlord's parent`
     ..  -- ... limbs (ii)-(v) ...
-    ..  "(d) a child or grandchild ..."      ... occupier's `is a child or grandchild of the landlord's partner`
+    ..  "(d) a child or grandchild ..."      ... occupier's `a child or grandchild of the landlord's partner`
     -- `is other` is deliberately NOT a disjunct: an off-list occupier is FALSE.
 ```
 
@@ -149,6 +149,13 @@ DECLARE Occupier HAS
 **Shape:** an enum per column's cell-type, a `TableRow` record (cells, with list-valued cells as `LIST OF` the
 enum), one `… WITH …` literal per row, and membership tested structurally with `any` + a local equality
 predicate.
+
+> **`WITH` is right here; it is not right for every table.** These columns mean different things and
+> are told apart by name, which is exactly when to spell the fields out. A table whose columns are
+> **inherently positional** — a rate scale, a salary grid, nine numbered ranks — wants positional
+> `OF` construction instead, plus a ruler comment naming the columns once. That is a width decision
+> with a real cost (`OF` is silently order-dependent), and it is set out in
+> [SKILL.md → Statutory tables: generate the layout, do not type it](../SKILL.md#statutory-tables-generate-the-layout-do-not-type-it).
 
 `ground-6.l4`:
 
@@ -243,11 +250,18 @@ Nothing below changes what you write. It is here because two further arguments f
 were made from the exporter that writes L4 out as DMN (Decision Model and Notation), whose
 expression language is FEEL, and retiring them silently would lose the measurements.
 
-> **Provenance.** These two rest on the DMN/FEEL exporter, which lives on the `mengwong/dmn-export`
-> line and is **not** on `unstable`: there is no `jl4-core/src/L4/Dmn/` and `l4 --help` has no `dmn`
-> subcommand here. Reported behaviour of another branch, not something to verify in situ. Re-check
-> against `specs/todo/DMN-EXPORT-PROGRAM-MODEL-SPEC.md` §2.4 and §3 once that line merges — two
-> earlier versions of this passage stated the FEEL null semantics backwards.
+> **Provenance — corrected 2026-09-11.** This note used to say the DMN/FEEL exporter was **not** on
+> `unstable`, that there was no `jl4-core/src/L4/Dmn/`, and that the behaviour below could not be
+> verified in situ. **That line has since merged and all three claims are now false**: the directory
+> holds `Analysis.hs`, `Emit.hs`, `IR.hs`, `Lower.hs` and `Markdown.hs`, and the exporter is reached
+> as `l4 export dmn|dmn-md|bpmn` (there is no bare `dmn` subcommand, which is what the old
+> wording was probably reaching for). So this **is** checkable against the `l4-ide` tree now — note
+> that if you are reading this from the packaged plugin bundle rather than the monorepo, the
+> exporter's source is not beside you and you will need the `l4-ide` checkout. Note also that the two
+> bullets below were written from the branch and have not been re-measured against the merged
+> exporter by whoever corrected this provenance. Re-check them against
+> `specs/todo/DMN-EXPORT-PROGRAM-MODEL-SPEC.md` §2.4 and §3, and against the exporter itself, before
+> relying on them; two earlier versions of this passage stated the FEEL null semantics backwards.
 
 - **A finite declared domain.** A nullary `IS ONE OF` is the one L4 type with a faithful image in
   FEEL/DMN, because its values serialise as strings; it lowers to `typeRef="string"`. `MAYBE T` is a
@@ -432,9 +446,11 @@ The clamp-immune way to go _backward_ — decrement the YEAR (`ground-2ZD.l4`, "
 **Statute:** Part I grounds are **mandatory** ("the court … shall … make an order"); Part II grounds are
 **discretionary** ("the court may … if it considers it reasonable").
 **Shape:** Part I → `PARTY Court MUST \`order possession\``; Part II → `PARTY Court MAY \`order possession\``(with a reasonableness conjunct). This rides the MUST/MAY default semantics: **MUST** — omission ⇒`BREACH`;
-**MAY** — benign omission ⇒ `FULFILLED` (no breach), which is exactly what makes the ground *discretionary*.
-The deadline keyword is **`WITHIN <number>` only** (`BEFORE` is not valid). See [regulative.md](regulative.md)
-for the full HENCE/LEST default table.
+**MAY** — benign omission ⇒ `FULFILLED` (no breach), which is exactly what makes the ground _discretionary_.
+See [regulative.md](regulative.md) for the full HENCE/LEST default table.
+
+The deadline keyword is `WITHIN <number>` for a duration and `BEFORE <date>` for a date (`BEFORE 30`
+is a check error naming `WITHIN`); `AFTER` opens the window. See [regulative.md](regulative.md).
 
 ```l4
 -- Part I (ground-6.l4): mandatory
@@ -531,7 +547,7 @@ the securities_, and `` transfer's `days since the securities were issued` `` al
 transfer **has** days since…_. Writing the verb into the field name says it twice.
 
 ```l4
--- WRONG — the clitic already supplied "is".
+-- WRONG — the clitic already supplied "is".   CLITIC-VERB-OK negative example
     `is to the issuer of the securities`     IS A BOOLEAN
     `has a date of transfer`                 IS A DATE
 
@@ -545,6 +561,73 @@ This is not tidiness. The field name is what the **ladder prints** beside its no
 it costs fidelity: 17 CFR 227.501(a)(1) says "To the issuer of the securities" — the statute starts
 at the complement too, because its own chapeau ("unless such securities are transferred:") supplied
 the verb. Matching that is the whole point.
+
+**Ruling (Meng, 2026-09-13) — it binds the DECLARATION, and it binds everywhere.** Two extensions
+to the above, both from the same day:
+
+1. **Everywhere.** No clitic dereference of an attribute or computed field whose name starts with
+   `is ` or `has `, in any `.l4` or `.md` in the repo — not only the pages that teach style.
+   Meng's reason: _"every l4 file is a training example ultimately."_
+2. **Declarations too.** A field named `` `is bankrupt` `` is wrong where it is DECLARED, whether or
+   not anything dereferences it yet, for the same reason: a `DECLARE` block is what an example
+   teaches naming from. At the ruling there were 121 such names over 175 declaration sites, 74
+   dereferenced and 47 not.
+
+**And the exception.** Rare exceptions may keep the verb, _"especially if they are terms of art from
+the upstream source"_. The test used is objective rather than a matter of taste: **the name contains
+a second `is`/`has` inside it.** A name we coined does not do that; a limb quoted from a statute does,
+because the source sentence has its own clauses — and where the chapeau does not supply the verb
+(Reg CF's is bare, "if the issuer:") the limb carries it, so matching the source means carrying it
+too. Fidelity to the source is this ruling's own rationale, so it is also its own limit.
+
+**What NOT to design toward.** The same ruling declines the Prolog-style prefix predicate
+(`` `is bankrupt` person ``) as a reason to keep the verb: drafters will not take to it. Where a
+genuine predicate is wanted, that is an `ASSUME … IS A FUNCTION FROM … TO BOOLEAN`, which is not an
+attribute and which this ruling does not reach.
+
+**Enforcement.** `etc/check-clitic-verbs.mjs` checks both rules over every `.l4` and `.md`. It is a
+separate file from `etc/check-retired-terms.mjs` on purpose: that one blanks code spans and fenced
+blocks before searching, because its terms are prose words, and this rule lives only inside code.
+Exceptions are either a `CLITIC-VERB-OK` marker on the line, or — for a name used in many places —
+an entry in the checker's `EXEMPT` list with its reason. Neither script runs in CI; both are tools
+you run by hand.
+
+**Repair.** `etc/apply-clitic-sweep.mjs` performs the rename the checker asks for. It **imports** the
+checker's regexes, `EXEMPT` list and scanner rather than restating them, so the two cannot drift —
+two earlier appliers were written with their own patterns and thrown away.
+
+```
+node etc/apply-clitic-sweep.mjs --check    <dir>...   # exit 1 if any rename is pending
+node etc/apply-clitic-sweep.mjs --dry-run  <dir>...   # show them without writing
+node etc/apply-clitic-sweep.mjs            <dir>...   # apply
+node etc/apply-clitic-sweep.mjs --selftest
+```
+
+**It renames only what is DECLARED.** The checker is designed to over-report, because a
+dereference-shaped match is cheap and a human filters the result; its own header lists the benign
+classes it knowingly reports. An applier makes every one of those actionable, so the rule here is
+narrower than the checker's: a name needs at least one **declaration** site. A name seen only
+through a dereference is printed and left alone — it may be a mixfix predicate, a mention in a
+comment, or a name the checker truncated because it wrapped across lines.
+
+Three more things it will not do, each for a measured reason. It rewrites only **delimited**
+occurrences — `` `name` ``, `"name"`, and the escaped `` \`name\` `` that
+L4-inside-a-JS-template-literal uses — because the same words appear in quotations of the statute
+and in comments, where editing them would make the corpus say something the Act does not. **The
+quoted form is not used in `.l4` or `.md` at all**: there a double-quoted run is a string literal or
+ordinary prose, not a reference to a field. It never enters `tests/`, because goldens are
+regenerated from swept sources and hand-editing one blesses output nothing produced. And it
+**refuses to write inside `jl4/examples/canon/`**, the vendored mirror: a sweep applied there makes
+the mirror disagree with the SHA in `etc/canon-pin.json`. Sweep in canon, then bump the pin. That
+refusal resolves real paths and is checked per file, so passing a parent directory does not slip
+past it.
+
+A rename whose target name is **already bound** is listed and held back, never forced — the checker
+reports it as outstanding until a human decides. The collision domain is the directories you pass
+**plus `jl4-core/libraries`**, which nearly every module imports; a binding in a corpus nothing
+imports is not a collision, so it is deliberately not searched for. The run prints the domain size. That is not a limitation but the interesting case:
+in canon, `is the natural father` wanted a name already taken by a test fixture, and the resolution
+was to rename the fixture first.
 
 ### Spell the last connective — `..` … `OR`, and `...` … `AND`
 
@@ -721,7 +804,7 @@ Three parts of the ruling that are easy to get wrong:
    expecting "'s", "--", "..", "...", "/*", "//", …
    ```
 3. **Never bare juxtaposition.** Dropping the `...` is function application, and it type-errors on any
-   node whose head is a record binder:
+   node whose head is a record-typed name:
 
    ```
    You are giving 1 input to
