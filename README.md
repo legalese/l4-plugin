@@ -20,20 +20,23 @@
 **This directory is generated. Do not edit it by hand.** Every file here was
 copied out of [legalese/l4-ide](https://github.com/legalese/l4-ide) by
 `etc/build-plugin-bundle.mjs`; edits made here are lost on the next build.
-Change the skill in l4-ide at `.claude/skills/writing-l4-rules/` and rebuild.
+Change a skill in l4-ide under `skills/` and rebuild.
 
-Generated from l4-ide `c76e6b041f0b`.
+Generated from l4-ide `a3ebc0e76682`.
 
 ## What is here, and why
 
-`skills/writing-l4-rules/` is the skill. Everything else is the material the
-skill **cites**: it teaches by worked example, naming files like
-`jl4/examples/canon/us/regcf/regcf.l4` in its prose rather than restating them.
+`skills/encoding-a-subject/` and `skills/writing-l4-rules/` are the skills:
+`writing-l4-rules` teaches the language, and `encoding-a-subject`, where present, is
+the workflow for encoding a whole body of law and filing it in legalese/canon.
+Everything else is the material the skills **cite**: they teach by worked example,
+naming files like `jl4/examples/canon/us/regcf/regcf.l4` in prose rather than
+restating them.
 Those citations are carried at their original repo-relative paths, so each one
 resolves against this bundle root exactly as it resolves against the l4-ide
 root. Nothing in the skill text was rewritten.
 
-The set is computed from the skill's own text, not from a maintained list, so
+The set is computed from the skills' own text, not from a maintained list, so
 citing a new example carries that example on the next build.
 
 One class is deliberately **not** carried: `jl4-core/libraries/*.l4`, the
@@ -46,10 +49,10 @@ than itself does not report a version mismatch; it fails as cascading
 
 | | |
 |---|---|
-| skill | 22 files |
+| skills | 2 (28 files) |
 | cited material | 51 files |
 | cited but NOT carried | 5 standard-library files |
-| bundle | 4.83 MB |
+| bundle | 4.87 MB |
 | the repo it came from | 289 MB packed |
 
 That last row is the reason this bundle exists: installing the plugin used to
