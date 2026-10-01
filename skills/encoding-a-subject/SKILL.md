@@ -10,7 +10,7 @@ It sits between two other things:
 
 - **[`writing-l4-rules`](../writing-l4-rules/SKILL.md)** teaches the language: syntax, `IS` / `MEANS` / `IF`, regulative rules, dates, and the drafting idioms for statutory text (`references/drafting-patterns.md` and `references/source-patterns/` there).
   Everything in this skill that says "encode" means "encode the way that skill says".
-- **The `go` pipeline** in the `legalese/l4-ide` repository (the `go.sh` driver under `etc/go/`, and the `running-the-l4-pipeline` skill that lives only there) takes a _finished_ encoding and checks it, projects it to DMN, BPMN, a web wizard and so on, and writes a conversion report.
+- **The `go` pipeline** — Legalese's private repository `legalese/l4-pipeline`, run from `etc/go/` of an l4-ide checkout, with its own `running-the-l4-pipeline` skill — takes a _finished_ encoding and checks it, projects it to DMN, BPMN, a web wizard and so on, and writes a conversion report.
   It does not write L4.
   You do not need it to produce a good encoding, and nothing in this skill depends on it.
 
@@ -99,9 +99,14 @@ Write a tests module whose expected values come **from the source**: worked exam
 
 ### 7. The self-check loop — read the diagnostics
 
-**`l4 run` exits 0 when an `#ASSERT` fails.** The failure is a `DiagnosticSeverity_Error` line whose message is `assertion failed`. A run that "passed" by exit code can be carrying failed assertions.
+**`l4 run` exits 0 when an `#ASSERT` fails, and when it refuses.** A run that "passed" by exit code can be carrying either.
+The outcome is printed in one of three shapes, and only the first is on the `Message:` line itself:
 
-Copy [`assets/check.sh`](assets/check.sh) into the encoding directory. It runs every module and prints, per module, errors, assertions satisfied, and assertions failed, and exits non-zero on any error or failed assertion:
+- `Message:  assertion failed`, at `DiagnosticSeverity_Error`;
+- `Message:`, then on the next line `assertion failed: expected a refusal, but the expression produced a value`, also at Error, from an `#ASSERT REFUSED` whose expression answered;
+- `Message:`, then on the next line `assertion refused: …`, at **Warning**, from an `#ASSERT` whose expression refused. It is never an error, so a check that counts errors passes it.
+
+Copy [`assets/check.sh`](assets/check.sh) into the encoding directory. It runs every module and prints, per module, errors, assertions satisfied, failed and refused, reading the line after every `Message:` so that all three shapes are counted. It exits non-zero on any error that is not an expected failed assertion, on any refused assertion, and when a module's failures differ from the count its `expected_failed` table gives (zero, unless you list a module that is meant to fail):
 
 ```bash
 L4=/path/to/l4 ./check.sh
@@ -150,5 +155,5 @@ Each of these is a way for an encoding to look finished and not be:
 | a number from the amended text answering for the original    | vintages as inputs (step 5)                              |
 | tests that restate the code, so they cannot fail             | tests from the source; the independent pass (steps 6, 8) |
 | an expected value edited until the test passed               | a failing assertion is a finding (step 6)                |
-| "all green" over a run with failed assertions                | `check.sh`, not the exit code (step 7)                   |
+| "all green" over a run with failed or refused assertions     | `check.sh`, not the exit code (step 7)                   |
 | valid-looking syntax rejected by an old binary               | a current `l4` (step 0)                                  |
