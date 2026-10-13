@@ -889,6 +889,18 @@ ever contains the keyword. One pre-existing limit is kept and now documented in 
 whose type is left as an inference variable (the overloaded `>=` does this to `age >= 18`) earns no
 fix, since LSP 3.17 has no snippet support to leave a hole; the old action had the same guard.
 
+**The type role, 2026-10-07.** The repointing above covered the term role only.
+An unknown type name raises the same `OutOfScopeError`, told apart only by the `KindInfo` the checker puts on the name (`resolveType` in `jl4-core/src/L4/TypeCheck.hs`), so it took the term's path.
+Measured by failing tests before the change: for `GIVEN w IS A Widget` with no `Widget` declared, the fix offered "Add `Widget` to the GIVEN of the rule `is shiny`", inserting `Widget IS A TYPE`, which makes `Widget` a type variable and not the opaque type §11.1.1 rules for the type role; under a heading it offered a section `GIVEN` of the same shape; and for the type of a `DECLARE`'s field, with no `DECIDE` or `MEANS` around it, it offered nothing.
+A type now gets a bodiless `DECLARE T` (`outOfScopeDeclareFix` in `jl4-lsp/src/LSP/L4/Actions.hs`), on a new line directly above the top-level declaration that contains the use, at its indentation, followed by a blank line.
+A use in a section's own `GIVEN` is contained by the section, so the line goes above its `§` heading.
+The line also goes above every annotation between that declaration and whatever precedes it, because a leading annotation attaches to the next declaration below it and a `DECLARE` inserted under one takes it over: a positive control that inserted one line lower moved the `@desc` onto the new `DECLARE`.
+It also takes in the run of comment lines directly over the declaration, or over its first annotation, since a leading comment reads as the declaration's own; a comment with a blank line under it stays where it is (assumed, not ruled, and in a commit of its own).
+A type applied to arguments gets one parameter per argument, named apart from every name the module spells (`DECLARE Box b c` in a module that already uses `a`); offering nothing instead was rejected, because §11.1.1 already makes a parameterised bodiless head the declaration of a type of exactly that arity.
+The term role, and its five tests, are unchanged.
+The handler kept the name `outOfScopeAssumeQuickFix` after the 2026-09-06 repointing, though it had stopped inserting an `ASSUME`; it is now `outOfScopeDeclarationQuickFix` in `jl4-lsp/app/LSP/L4/Handlers.hs`.
+`jl4-lsp/test/OutOfScopeGivenFixSpec.hs` pins each position, and re-checks every edited module requiring no error at all.
+
 **Refuted and repaired, 2026-09-07.** Under the standing authorisation for adversarial workflows
 (BRIEF §14), ten Opus refuters attacked three claims about the warning — the role and line are right
 (A), every author-written `ASSUME` warns exactly once (B), nothing else ever warns (C) — plus a
@@ -1104,6 +1116,16 @@ that ruling is `TYPICALLY-DEFAULTS-SPEC.md:420-428` and the record is
 reach: the JSON and service boundary keeps defaulting an absent `MAYBE` field to `NOTHING`
 (`Machine.hs:2282`, `Backend/Jl4.hs:436-441`, `JsonSchema.hs:264`), and `TYPICALLY NOTHING` does not
 gate it.
+
+**EXTENDED 2026-10-01 by `TYPICALLY-ONE-BEHAVIOUR-SPEC.md` §5 (PR #525), ruled on bench "Unknowns and Defaults".**
+T1: any field declared `TYPICALLY`, not only a `MAYBE … TYPICALLY NOTHING` field, may be omitted at construction and may be absent in JSON, taking its default.
+T2: a module-level `ASSUME … TYPICALLY` takes its default at the root.
+T3: on the wire, absent means not asked and takes the default, `null` means "don't know" and never does, and `fromMaybe FALSE` leaves the service.
+T4: one switch turns presumption off for every evaluation.
+T5: exporters map a default or report dropping it.
+T6: responses list the defaults actually forced.
+The rulings, with their conditions, are recorded there; this section remains the ruling they extend.
+Each was amended the same day by its bench amendment card (T1b, T2b, T5b, T6b, TU-wire-b, TU-presume-b), recorded under the ruling it amends.
 
 ### 11.6 R4 — The section binder is the indented `GIVEN` on the line after the heading. RULED 2026-09-04.
 

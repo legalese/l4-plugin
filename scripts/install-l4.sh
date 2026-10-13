@@ -8,11 +8,11 @@
 # Installs to ~/.local/lib/l4-<tag>/ and links ~/.local/bin/{l4,jl4-lsp}.
 set -euo pipefail
 
-TAG="unstable-20260926-c76e6b0"
+TAG="unstable-20261012-f48a0ed"
 REPO="legalese/prereleases"
-SHA_darwin_arm64="9d525be3e7796ab1ea0e40ea0672428a7ac5a2f38e20d2cf295b5059f0637e2d"
-SHA_linux_x64="6003c268f9c519641c3034a9b536424605dd5f4a773b82f0f4adeed6593f174d"
-SHA_win32_x64="f0fe5c44a64e3804446a49466539f8b2cd2be03c74ed92efc97276735c59a548"
+SHA_darwin_arm64="f91e82c82259610a2332bd87c5e621b74ecb5c1a48b5e1f2801775fa2c2a99a5"
+SHA_linux_x64="c84835794a687b235f43d3058f5f3b6e68a82b0e5ccce340e623698c72a7d8c0"
+SHA_win32_x64="99c759a5732d1c5e5561543d041e40f546ae2ac340504528065d26dc12db01bc"
 
 os="$(uname -s)"; arch="$(uname -m)"
 case "$os/$arch" in

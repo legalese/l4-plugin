@@ -10,7 +10,7 @@ It sits between two other things:
 
 - **[`writing-l4-rules`](../writing-l4-rules/SKILL.md)** teaches the language: syntax, `IS` / `MEANS` / `IF`, regulative rules, dates, and the drafting idioms for statutory text (`references/drafting-patterns.md` and `references/source-patterns/` there).
   Everything in this skill that says "encode" means "encode the way that skill says".
-- **The `go` pipeline** in the `legalese/l4-ide` repository (the `go.sh` driver under `etc/go/`, and the `running-the-l4-pipeline` skill that lives only there) takes a _finished_ encoding and checks it, projects it to DMN, BPMN, a web wizard and so on, and writes a conversion report.
+- **The `go` pipeline** — Legalese's private repository `legalese/l4-pipeline`, run from `etc/go/` of an l4-ide checkout, with its own `running-the-l4-pipeline` skill — takes a _finished_ encoding and checks it, projects it to DMN, BPMN, a web wizard and so on, and writes a conversion report.
   It does not write L4.
   You do not need it to produce a good encoding, and nothing in this skill depends on it.
 
@@ -81,7 +81,9 @@ Now encode, a section or a unit at a time, moving each coverage row as you go.
 How to write each construct is [`writing-l4-rules`](../writing-l4-rules/SKILL.md)'s job; read its `references/drafting-patterns.md` and the `references/source-patterns/` pages before you start, not when you get stuck.
 The rules that decide whether a reviewer can trust the result:
 
-- **Isomorphic.** Someone holding the source beside your module can check it provision by provision. One source provision → one recognisable place in the L4, with the source's numbering and a citation (`@ref` or a comment) on every rule.
+- **Isomorphic.** Someone holding the source beside your module can check it provision by provision.
+  One source provision → one recognisable place in the L4, with the source's numbering and an `@ref` citation on every rule.
+  If you keep the source as a text file, quote it and put source locators on the `@ref`, so that a script can check the quotation and the citation against the file: [`references/source-locators.md`](references/source-locators.md).
 - **Vintages are inputs, never merged.** Where the law exists in two versions, use the rule-version (rule-effective-time) mechanism in `writing-l4-rules` (`references/source-patterns/04-dates-and-periods.md`), or take the vintage as an explicit input. A vintage that is silent on something answers with silence — never with a number borrowed from another vintage.
 - **`REFUSE "…"` where the sources do not answer** — never `FALSE`, `0` or a plausible default. `MAYBE` / `NOTHING` where the source itself names an absent case. See `references/source-patterns/11-when-the-encoding-cannot-answer.md`.
   Do not invent your own three-valued logic (`Established` / `Rejected` / `Unresolved` enums threaded through every rule): the language already has these, and a home-made version is one more thing a reviewer must learn before they can read a single rule.
@@ -99,9 +101,15 @@ Write a tests module whose expected values come **from the source**: worked exam
 
 ### 7. The self-check loop — read the diagnostics
 
-**`l4 run` exits 0 when an `#ASSERT` fails.** The failure is a `DiagnosticSeverity_Error` line whose message is `assertion failed`. A run that "passed" by exit code can be carrying failed assertions.
+**Read the diagnostics, not only the exit code.**
+`l4 run` exits 1 when an `#ASSERT` fails, but it exits 0 when one refuses, an `l4` built before legalese/l4-ide#518 exits 0 when one fails too, and no exit code says which assertion failed or how many ran.
+The outcome is printed in one of three shapes, and only the first is on the `Message:` line itself:
 
-Copy [`assets/check.sh`](assets/check.sh) into the encoding directory. It runs every module and prints, per module, errors, assertions satisfied, and assertions failed, and exits non-zero on any error or failed assertion:
+- `Message:  assertion failed`, at `DiagnosticSeverity_Error`;
+- `Message:`, then on the next line `assertion failed: expected a refusal, but the expression produced a value`, also at Error, from an `#ASSERT REFUSED` whose expression answered;
+- `Message:`, then on the next line `assertion refused: …`, at **Warning**, from an `#ASSERT` whose expression refused. It is never an error, so a check that counts errors passes it.
+
+Copy [`assets/check.sh`](assets/check.sh) into the encoding directory. It runs every module and prints, per module, errors, assertions satisfied, failed and refused, reading the line after every `Message:` so that all three shapes are counted. It exits non-zero on any error that is not an expected failed assertion, on any refused assertion, and when a module's failures differ from the count its `expected_failed` table gives (zero, unless you list a module that is meant to fail):
 
 ```bash
 L4=/path/to/l4 ./check.sh
@@ -150,5 +158,5 @@ Each of these is a way for an encoding to look finished and not be:
 | a number from the amended text answering for the original    | vintages as inputs (step 5)                              |
 | tests that restate the code, so they cannot fail             | tests from the source; the independent pass (steps 6, 8) |
 | an expected value edited until the test passed               | a failing assertion is a finding (step 6)                |
-| "all green" over a run with failed assertions                | `check.sh`, not the exit code (step 7)                   |
+| "all green" over a run with failed or refused assertions     | `check.sh`, not the exit code (step 7)                   |
 | valid-looking syntax rejected by an old binary               | a current `l4` (step 0)                                  |

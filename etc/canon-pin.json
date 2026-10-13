@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "THE PIN: which commit of legalese/canon the vendored mirror under",
+    "THE PIN: which commit of legalese/commons the vendored mirror under",
     "jl4/examples/canon/ is a copy of, and which of its directories are blessed",
     "as part of this repository's regression corpus.",
     "",
@@ -14,17 +14,6 @@
     "<sha>`. CI runs `--check` on every PR and fails when the mirror and canon",
     "disagree, which is what makes this DETECTED duplication rather than the",
     "silent kind.",
-    "",
-    "--- the SHA is on a person's shelf, and that is still a known compromise ---",
-    "",
-    "SPEC §3B.6 says a blessed dir 'lives on canon main'. This pin does not:",
-    "its SHA is on `mengwong/drafts`, because that is where the content is, and",
-    "Meng reaffirmed that on 2026-09-23 (LODGER, M7). The target is canon `main`;",
-    "re-pin there when these directories reach it, and delete this paragraph",
-    "rather than softening it.",
-    "",
-    "A shelf SHA can be rebased away. If it is, `--pull` fails to fetch it — the",
-    "failure is loud, which is the property being relied on.",
     "",
     "`pinned` IS A UTC DATE, written by `writePin` from `toISOString()`, and it",
     "will therefore read one day EARLIER than the local date whenever a bump",
@@ -118,10 +107,10 @@
     "to move to a section-level GIVEN. Re-blessing makes the golden truthful.",
     "Migrating the encoding is a canon-side improvement and is not done."
   ],
-  "repo": "legalese/canon",
-  "sha": "297c234a696221f2ad91d4c846f3b01ad2042774",
-  "ref": "mengwong/drafts",
-  "pinned": "2026-09-25",
+  "repo": "legalese/commons",
+  "sha": "6b6476d6d94aeaaeb6fdcbf498c89316ee95b570",
+  "ref": "main",
+  "pinned": "2026-09-26",
   "blessed": [
     {
       "from": "subjects/sg/child-support/encodings/legalese",
