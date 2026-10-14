@@ -22,7 +22,7 @@ copied out of [legalese/l4-ide](https://github.com/legalese/l4-ide) by
 `etc/build-plugin-bundle.mjs`; edits made here are lost on the next build.
 Change a skill in l4-ide under `skills/` and rebuild.
 
-Generated from l4-ide `3cbb327fb6b6`.
+Generated from l4-ide `57cf94254766`.
 
 ## What is here, and why
 
