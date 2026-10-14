@@ -666,7 +666,7 @@ a rule with an unsupplied section `GIVEN`**, and it is what keeps a file in the 
 
 The delegation is not scaffolding you delete later. It is the same split the statute makes: a test
 stated in general terms, and a Part that applies it to the person the Part is about. Both names are
-worth having, and when supply lands the second becomes callable as it stands.
+worth having, and the second is callable as it stands, by supplying the section `GIVEN` with `WITH`.
 
 **Not** a `#EVAL` or `#ASSERT` on the section-`GIVEN` rule **without a `WITH`**. Exit 1, and on a
 page under `doc/` it fails the docs harness.
@@ -744,8 +744,8 @@ The statutory form is common:
 
 > `(a) to pay to the other party the sum which it is agreed in the contract by which the marriage was arranged is to be paid by the party in breach of the contract`
 >
-> — Administration of Muslim Law Act 1966 (Singapore) s 94(1)(a), in the repository at
-> `jl4/examples/legal/sg-succession/cleanroom-2026-08/source/AMLA1966.txt:4166-4168`
+> — Administration of Muslim Law Act 1966 (Singapore) s 94(1)(a), at
+> `AMLA1966.txt:4166-4168` of the `pdftotext -layout` rendering that legalese/canon's `subjects/sg/succession/encodings/cleanroom-2026-08/source/fetch-sso.py` re-creates byte for byte
 
 and the contract form — "the renewal fee shall be such amount as the parties may agree", "on terms
 to be agreed" — is the same words from the other side.
