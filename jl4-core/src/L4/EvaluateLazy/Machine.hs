@@ -29,6 +29,7 @@ module L4.EvaluateLazy.Machine
 , getModuleUri
 , getSafeMode
 , formatUTCTimeIso
+, getAnswerInJust
 -- * The string parsers TODATE, TOTIME and TODATETIME use, for callers that must
 -- agree with them (jl4-service names the input one of them refused).
 , parseDateText
@@ -137,8 +138,10 @@ import qualified L4.EvaluateLazy.DeonticStep as DS
 import L4.EvaluateLazy.Exceptions
 import L4.EvaluateLazy.SiblingReads
 import qualified L4.Lint.SiblingReads as Lint
-import L4.EvaluateLazy.Trace (EvalTraceAction (..))
+import L4.EvaluateLazy.Trace (EvalTrace, EvalTraceAction (..))
 import L4.Presumption
+import L4.TypeSynonym (substituteTypeParams)
+import L4.TypeCheck.Unify (synonymExpansionFuel)
 import L4.TracePolicy (TracePolicy)
 import qualified L4.TracePolicy as TracePolicy
 import L4.Utils.Ratio
@@ -528,6 +531,9 @@ data EvalState =
       -- ^ The defaults that took effect during this directive, in the order
       -- they were forced: W8's \"took its default\" event. Per directive,
       -- like 'notes' (swapped fresh by 'L4.EvaluateLazy.withFreshLedger').
+    , answerInJust :: !Bool        -- see 'L4.EvaluateLazy.EvalConfig'
+    , maxFrameDepth :: !Int        -- see 'maximumFrameDepth'
+    , tracePostprocessor :: [EvalTraceAction] -> EvalTrace  -- see 'L4.EvaluateLazy.EvalConfig'
     }
 
 -- | 'EvalState.presumed': the events in the order forced, and the ones seen,
@@ -1368,14 +1374,15 @@ refuseWith = raiseException . RefusalException
 pushFrame :: Frame -> Eval ()
 pushFrame frame = do
   stackRef <- asks (.stack)
+  limit <- asks (.maxFrameDepth)
   s <- liftIO (readIORef stackRef)
-  if s.size >= maximumFrameDepth
-    then userException StackOverflow
+  if s.size >= limit
+    then userException (StackOverflow limit)
     else do
       -- Emit the trace `Push` only once the frame is actually pushed. If we
       -- recorded it before the overflow check, a StackOverflow would leave a
       -- dangling Push (M Pushes / M+1 Pops) that later unbalances trace
-      -- post-processing and crashes it (see T7).
+      -- post-processing and crashes it.
       traceEval Push
       liftIO (writeIORef stackRef (MkStack (s.size + 1) (frame : s.frames)))
 
@@ -1437,6 +1444,9 @@ getTracePolicy = asks (.tracePolicy)
 
 getSafeMode :: Eval Bool
 getSafeMode = asks (.safeMode)
+
+getAnswerInJust :: Eval Bool
+getAnswerInJust = asks (.answerInJust)
 
 getEntityInfo :: Eval EntityInfo
 getEntityInfo = asks (.entityInfo)
@@ -2205,7 +2215,7 @@ forwardExpr env = \ case
     continueExpr env (App emptyAnno l [e]) -- we desugar projection to plain function application
   -- an operand of an in-step compound wants the next event (Note [Operands in step])
   Var _ann n | isGate n -> lockstepPause (getUnique n).unique
-  Var _ann n -> do -- still problematic: similarity / overlap between this and App with no args
+  Var ann n -> do -- still problematic: similarity / overlap between this and App with no args
     -- Auto-apply a discharged import only in VALUE position. The App case above
     -- fetches the function it is about to apply by re-entering here, and
     -- applying it twice would hand the caller the RESULT where it expects a
@@ -2215,8 +2225,14 @@ forwardExpr env = \ case
     -- allocated, not forwarded -- so an 'App1' carrying arguments on top of the
     -- stack means this reference is the function of that application.
     beingApplied <- topFrameAppliesArguments
-    r <- expectTerm env n
-    if beingApplied then continueRef r else autoApplyDischargedImport r
+    -- A bare JSONDECODE in value position, passed as a function, decodes at
+    -- the type its own reference was checked at ('jsonDecodeTargetOfReference').
+    target <- if beingApplied then pure Nothing else jsonDecodeTargetOfReference ann n
+    case target of
+      Just ty -> continueBackward (ValUnaryBuiltinFun (UnaryJsonDecodeAt ty))
+      Nothing -> do
+        r <- expectTerm env n
+        if beingApplied then continueRef r else autoApplyDischargedImport r
   Cons _ann e1 e2 -> do
     rf1 <- allocate_ e1 env
     rf2 <- allocate_ e2 env
@@ -5165,6 +5181,41 @@ topFrameAppliesArguments = do
     App1 (_ : _) _ : _ -> True
     _                  -> False
 
+-- | The type a bare @JSONDECODE@ reference decodes into, when it is passed as
+-- a function (@map JSONDECODE xs@) rather than applied where it is written
+-- (smucclaw/l4-ide#1078).
+--
+-- A decode is otherwise typed by the node that applies it (the 'App' case,
+-- 'UnaryJsonDecode'), and for a function passed on, that node is wherever it
+-- is finally applied: inside the prelude's @map@ it is @f x@, whose type says
+-- nothing about this call. The reference's own annotation does, once the type
+-- checker has resolved it ('L4.TypeCheck.zonkDecodeTargets').
+--
+-- Only a target the decoder can find is used: every type it names must be a
+-- type in the evaluator's entity table, the same table the decoder looks a
+-- record or an enumeration up in. A type parameter (@GIVEN a IS A TYPE@)
+-- never is, and a reference checked at one is common: the body of
+-- @GIVEN a IS A TYPE GIVETH A FUNCTION FROM STRING TO EITHER STRING a@ is
+-- stamped with that type. Using it would replace the type of the node that
+-- applies the function, which can be concrete, with @a@, and stop a decode
+-- that works. So anything else, an inference variable included, gives
+-- 'Nothing', and the reference stays the shared builtin, as before.
+jsonDecodeTargetOfReference :: Anno -> Resolved -> Machine (Maybe (Type' Resolved))
+jsonDecodeTargetOfReference ann n
+  | getUnique n == TypeCheck.jsonDecodeUnique
+  , Anno {extra = Extension {resolvedInfo = Just (TypeInfo ty _)}} <- ann
+  , Fun _ [_] (TyApp _ eitherRef [_, target]) <- ty
+  , getUnique eitherRef == TypeCheck.eitherUnique = do
+      entityInfo <- getEntityInfo
+      let declared r = case Map.lookup (getUnique r) entityInfo of
+            Just (_, TypeCheck.KnownType {}) -> True
+            _ -> False
+          decodable = \ case
+            TyApp _ r ts -> declared r && all decodable ts
+            _ -> False
+      pure (if decodable target then Just target else Nothing)
+  | otherwise = pure Nothing
+
 autoApplyDischargedImport :: Reference -> Machine Config
 autoApplyDischargedImport r = do
   needsIt <- dischargedImportClosure r
@@ -5548,34 +5599,7 @@ extractFieldNamesAndTypes ty = case ty of
 cannotDecode :: DecodeAt -> Text -> Aeson.Value -> Text -> Machine a
 cannotDecode at typeName jsonValue why =
   userException $ UserError $
-    "Could not decode " <> TE.decodeUtf8 (BS.toStrict (Aeson.encode jsonValue))
-      <> " as " <> typeName <> atField at <> ": " <> why
-
--- | What a value of a choice type is given as in JSON, for 'cannotDecode':
--- the constructors without fields, by name, and those with fields, which
--- cannot be given at all.
-choiceExpectation :: Text -> [Text] -> [Text] -> Text
-choiceExpectation typeName withoutFields withFields = case (withoutFields, withFields) of
-  ([], [])  -> typeName <> " has no constructor that JSON input can name."
-  ([], _)   -> "every constructor of " <> typeName <> " has fields (" <> commas withFields
-                 <> "), and a constructor with fields cannot be given as JSON input."
-  (_, [])   -> "expected a string naming one of: " <> commas withoutFields <> "."
-  (_, _)    -> "expected a string naming one of: " <> commas withoutFields
-                 <> ". A constructor with fields (" <> commas withFields
-                 <> ") cannot be given as JSON input."
-  where commas = Text.intercalate ", "
-
--- | Why a JSON string is not a value of a choice type, for 'cannotDecode'.
-choiceNameMiss :: Text -> Text -> [Text] -> [Text] -> Text
-choiceNameMiss typeName name withoutFields withFields
-  | name `elem` withFields =
-      name <> " has fields, and a constructor with fields cannot be given as JSON input"
-        <> if null withoutFields
-             then "."
-             else "; expected a string naming one of: " <> Text.intercalate ", " withoutFields <> "."
-  | otherwise =
-      "it names no constructor of " <> typeName <> "; "
-        <> choiceExpectation typeName withoutFields withFields
+    couldNotDecodeText (TE.decodeUtf8 (BS.toStrict (Aeson.encode jsonValue))) typeName (atField at) why
 
 -- | Is this a constructor of the given type, with or without fields?
 constructorReturning :: Type' Resolved -> Resolved -> Bool
@@ -5978,7 +6002,7 @@ suppliedField = \ case
 -- string for a @Year@ is accepted as it stands instead of refused as it is for
 -- a @NUMBER@.
 expandTypeSynonyms :: Type' Resolved -> Machine (Type' Resolved)
-expandTypeSynonyms = go (16 :: Int)
+expandTypeSynonyms = go synonymExpansionFuel
   where
     go 0 ty = pure ty
     go n ty@(TyApp _ tyRef args) = do
@@ -5989,18 +6013,6 @@ expandTypeSynonyms = go (16 :: Int)
               go (n - 1) (substituteTypeParams (Map.fromList (zip (map getUnique params) args)) body)
         _ -> pure ty
     go _ ty = pure ty
-
-substituteTypeParams :: Map Unique (Type' Resolved) -> Type' Resolved -> Type' Resolved
-substituteTypeParams sub = \ case
-  TyApp ann r []
-    | Just t <- Map.lookup (getUnique r) sub -> t
-    | otherwise -> TyApp ann r []
-  TyApp ann r ts -> TyApp ann r (map (substituteTypeParams sub) ts)
-  Fun ann args res ->
-    Fun ann [ MkOptionallyNamedType a n (substituteTypeParams sub t) | MkOptionallyNamedType a n t <- args ]
-      (substituteTypeParams sub res)
-  Forall ann vs t -> Forall ann vs (substituteTypeParams sub t)
-  other -> other
 
 -- | Check if a type is MAYBE α (used for optional record field handling)
 isMaybeFieldTy :: Type' Resolved -> Bool
@@ -6235,7 +6247,16 @@ runBuiltin es op mTy = do
               TypeCheck.KnownTerm conType Constructor -> do
                 -- Extract field names from the constructor's function type
                 fieldNames <- extractFieldNames conType
-                if length fieldNames /= length fields
+                case (fieldNames, fields) of
+                 ([], [field]) -> do
+                  -- One argument without a name, as in LEFT x and RIGHT x:
+                  -- an object keyed by the constructor, {"LEFT": x}, so the
+                  -- two sides of an EITHER stay apart.
+                  pushFrame (JsonEncodeConstructorFrame [] (nameToText (TypeCheck.getName conRef)) [])
+                  pushFrame (UnaryBuiltin0 UnaryJsonEncode Nothing)
+                  continueRef field
+                 _ ->
+                  if length fieldNames /= length fields
                   then internalException $ RuntimeTypeError $
                     "Field count mismatch for constructor " <> nameToText (TypeCheck.getName conRef) <>
                     ": expected " <> Text.pack (show (length fieldNames)) <>
@@ -6277,6 +6298,12 @@ runBuiltin es op mTy = do
           decodeJsonToValueTyped jsonStr innerTy
         Nothing ->
           decodeJsonToValue jsonStr
+      continueBackward result
+    -- The type came with the function value ('jsonDecodeTargetOfReference');
+    -- the node applying it, here, may know less.
+    UnaryJsonDecodeAt target -> do
+      jsonStr <- expectString es
+      result <- decodeJsonToValueTyped jsonStr target
       continueBackward result
 #ifdef HTTP_ENABLED
     UnaryFetch -> do
@@ -6452,31 +6479,47 @@ runBuiltin es op mTy = do
       val :: Rational <- expectNumber es
       let valDouble :: Double
           valDouble = fromRational val
+          -- The functions computed on a double. An answer that is not finite
+          -- would reach 'toRational' as a meaningless 309-digit number, so it
+          -- raises, naming the input when the input is what did not fit. A
+          -- finite answer is returned, even for an input past the range: ATAN
+          -- of 10^400 is pi/2 to the last digit.
+          viaDouble :: Text -> (Double -> Double) -> Machine Config
+          viaDouble name f
+            | isNaN r || isInfinite r =
+                userException $ UserError (name <> " cannot compute this: " <> why)
+            | otherwise = continueBackward $ ValNumber (toRational r)
+            where
+              r = f valDouble
+              why
+                | isInfinite valDouble = "the number is past the range of numbers it handles (about 1.8E308 either side of 0)"
+                | valDouble == 0 && val /= 0 = "the number is too close to 0 for the numbers it handles (about 4.9E-324)"
+                | otherwise = "the result is too large (it handles results up to about 1.8E308)"
       case op of
         UnaryLn ->
           if val <= 0
             then userException $ UserError "LN expects input greater than 0"
-            else continueBackward $ ValNumber (toRational (log valDouble))
+            else viaDouble "LN" log
         UnaryLog10 ->
           if val <= 0
             then userException $ UserError "LOG10 expects input greater than 0"
-            else continueBackward $ ValNumber (toRational (logBase 10 valDouble))
+            else viaDouble "LOG10" (logBase 10)
         UnarySin ->
-          continueBackward $ ValNumber (toRational (sin valDouble))
+          viaDouble "SIN" sin
         UnaryCos ->
-          continueBackward $ ValNumber (toRational (cos valDouble))
+          viaDouble "COS" cos
         UnaryTan ->
-          continueBackward $ ValNumber (toRational (tan valDouble))
+          viaDouble "TAN" tan
         UnaryAsin ->
           if val < (-1) || val > 1
             then userException $ UserError "ASIN expects input between -1 and 1"
-            else continueBackward $ ValNumber (toRational (asin valDouble))
+            else viaDouble "ASIN" asin
         UnaryAcos ->
           if val < (-1) || val > 1
             then userException $ UserError "ACOS expects input between -1 and 1"
-            else continueBackward $ ValNumber (toRational (acos valDouble))
+            else viaDouble "ACOS" acos
         UnaryAtan ->
-          continueBackward $ ValNumber (toRational (atan valDouble))
+          viaDouble "ATAN" atan
         UnaryIsInteger -> continueBackward $ valBool $ isJust $ isInteger val
         UnaryRound -> continueBackward $ valInt $ round val
         UnaryCeiling -> continueBackward $ valInt $ ceiling val
@@ -6485,7 +6528,7 @@ runBuiltin es op mTy = do
         UnarySqrt ->
           if val < 0
             then userException $ UserError "SQRT expects input greater than or equal to 0"
-            else continueBackward $ ValNumber (toRational (sqrt valDouble))
+            else viaDouble "SQRT" sqrt
   where
     valInt :: Integer -> WHNF
     valInt = ValNumber . toRational
@@ -6559,11 +6602,32 @@ runBinOp BinOpModulo    (ValNumber num1) (ValNumber num2)      = do
   if n2 /= 0
     then continueBackward $ ValNumber (toRational $ n1 `mod` n2)
     else userException (DivisionByZero BinOpModulo)
-runBinOp BinOpExponent  (ValNumber base) (ValNumber exp_)   =
-  let result = (fromRational base :: Double) ** (fromRational exp_ :: Double)
-  in if isNaN result || isInfinite result
-       then userException $ UserError "TO THE POWER OF produced a non-finite result (overflow, 0 to a negative power, or a negative base raised to a fractional power)"
-       else continueBackward $ ValNumber (toRational result)
+runBinOp BinOpExponent  (ValNumber base) (ValNumber exp_)
+  -- Checked on the exact values: as doubles, a huge negative base is -Infinity,
+  -- and a power that is nearly whole rounds to whole, and then no NaN says so.
+  | base == 0 && exp_ < 0 =
+      userException $ UserError "EXPONENT of 0 to a negative power has no result"
+  | base < 0 && denominator exp_ /= 1 =
+      userException $ UserError "EXPONENT does not compute a negative number to a fractional power"
+  | otherwise =
+      let base' = fromRational base :: Double
+          exp' = fromRational exp_ :: Double
+          result = base' ** exp'
+      -- Only an answer that is not finite raises; a finite one is returned,
+      -- even for an input past the range: 10^400 to the power 0 is 1.
+      in if isNaN result || isInfinite result
+           then userException $ UserError (exponentNotFinite base' exp')
+           else continueBackward $ ValNumber (toRational result)
+  where
+    -- A result that is not finite is not always too large: an input that is
+    -- past the range of a double is already infinite, or 0, before the power is
+    -- taken, and then the true result may well fit. Only when every input fits
+    -- is the result said to be too large.
+    exponentNotFinite base' exp'
+      | isInfinite base' = "EXPONENT cannot compute this: the base is past the range of numbers it handles (about 1.8E308 either side of 0)"
+      | base' == 0 && base /= 0 = "EXPONENT cannot compute this: the base is too close to 0 for the numbers it handles (about 4.9E-324)"
+      | isInfinite exp' = "EXPONENT cannot compute this: the power is past the range of numbers it handles (about 1.8E308 either side of 0)"
+      | otherwise = "EXPONENT overflowed: the result is too large (it handles results up to about 1.8E308)"
 runBinOp BinOpTrunc (ValNumber value) (ValNumber digits) =
   let digitsInt = round digits :: Integer
       scale k = (10 :: Rational) ^^ k
@@ -7446,20 +7510,27 @@ preAllocate ns = do
   pure (Map.fromList pairs)
 
 allocate_ :: Expr Resolved -> Environment -> Machine Reference
-allocate_ (Var _ann n) env = do
-  -- special case where we do not actually need to allocate
-  --
-  -- NOT extended to auto-apply a discharged import (see
-  -- 'dischargedImportClosure'). Allocating the application here instead of
-  -- sharing the cell fixes an operand-position reference across an IMPORT, but
-  -- it also fires on every RECORD CONSTRUCTOR: a @DECLARE@'s field names are
-  -- module-level selectors, so a constructor's parameters are keys in its own
-  -- captured environment exactly as a discharged reader's are, and the guard
-  -- cannot tell them apart. Measured 2026-09-05 on the sweep corpus:
-  -- @legal\/promissory-note.l4@ and @legal\/regcf\/regcf.l4@ both went red with
-  -- \"expected a function but found: Money OF ...\". See the operand-position
-  -- limitation recorded in IMPLICIT-PROPS-DESIGN.md.
-  expectTerm env n
+allocate_ (Var ann n) env = do
+  -- An argument that is a bare JSONDECODE, as in @map JSONDECODE xs@, gets
+  -- its own cell, which knows the type to decode at; sharing the builtin's
+  -- cell would lose it ('jsonDecodeTargetOfReference', smucclaw/l4-ide#1078).
+  target <- jsonDecodeTargetOfReference ann n
+  case target of
+    Just ty -> allocateValue (ValUnaryBuiltinFun (UnaryJsonDecodeAt ty))
+    Nothing ->
+      -- special case where we do not actually need to allocate
+      --
+      -- NOT extended to auto-apply a discharged import (see
+      -- 'dischargedImportClosure'). Allocating the application here instead of
+      -- sharing the cell fixes an operand-position reference across an IMPORT, but
+      -- it also fires on every RECORD CONSTRUCTOR: a @DECLARE@'s field names are
+      -- module-level selectors, so a constructor's parameters are keys in its own
+      -- captured environment exactly as a discharged reader's are, and the guard
+      -- cannot tell them apart. Measured 2026-09-05 on the sweep corpus:
+      -- @legal\/promissory-note.l4@ and @legal\/regcf\/regcf.l4@ both went red with
+      -- \"expected a function but found: Money OF ...\". See the operand-position
+      -- limitation recorded in IMPLICIT-PROPS-DESIGN.md.
+      expectTerm env n
 allocate_ expr env =
   fst <$> allocateRecursive expr (const env)
 
@@ -7608,13 +7679,15 @@ evalDirective env (AssertRefused ann expr mmsg) = do
   -- is decided statically here rather than evaluated.
   --
   -- 'Nothing' here means "the directive imposes no constraint on the reason",
-  -- so the wildcard MUST be unreachable for a payload the author wrote: a
-  -- payload we cannot read would otherwise become an assertion that holds for
-  -- every refusal reason. Two upstream checks make it so -- 'Parser.directive'
-  -- accepts only a 'lit' after BECAUSE, and 'TypeCheck.inferDirective' requires
-  -- that literal to be a STRING -- which leaves the wildcard reachable only for
-  -- a module that never type-checked. If you widen either of those, decide what
-  -- an unreadable payload means before you land it.
+  -- so it MUST be unreachable for a reason the author wrote: a reason we
+  -- cannot read, or one that never reaches the directive, would otherwise
+  -- become an assertion that holds for every refusal reason. Three upstream
+  -- checks make it so -- 'Parser.directive' accepts only a 'lit' after
+  -- BECAUSE, 'Parser.assertRefusedSubject' rejects a BECAUSE that a BREACH in
+  -- the expression would take as its own, and 'TypeCheck.inferDirective'
+  -- requires the literal to be a STRING -- which leaves the wildcard reachable
+  -- only for a module that never type-checked. If you widen any of those,
+  -- decide what an unreadable reason means before you land it.
   let wanted = case mmsg of
         Just (Lit _ (StringLit _ t)) -> Just t
         _                            -> Nothing

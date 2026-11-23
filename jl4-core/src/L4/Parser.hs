@@ -17,6 +17,9 @@ module L4.Parser (
   langTagOfToken,
   declaredModuleLang,
   redundantLangEnRanges,
+  overriddenLangWarnings,
+  spacedSlotsIn,
+  spacedSlotWarnings,
   MixfixHintRegistry,
   buildMixfixHintRegistry,
   emptyMixfixHintRegistry,
@@ -39,6 +42,7 @@ module L4.Parser (
 import Base
 
 import qualified Control.Applicative as Applicative
+import Data.Char (isAlpha, isAlphaNum, isSpace)
 import Generics.SOP.BasicFunctors
 import Generics.SOP.NS
 import qualified Data.IntMap.Strict as IntMap
@@ -75,6 +79,11 @@ type Parser = ReaderT Env (StateT PState (ParsecT Void TokenStream (StateT Group
 data Env = Env
   { moduleUri :: NormalizedUri
   , mixfixHints :: MixfixHintRegistry
+    -- ^ The mixfix words in scope, fixed for a whole run except that the body
+    -- of a rule reads them with the rule's own inputs shadowed
+    -- ('shadowMixfixWords', set by 'clauseBody'). Which inputs those are is
+    -- decided by the position: every body is read under the one signature
+    -- that precedes it.
   , ofIsAnchor :: Bool
     -- ^ Are we parsing the DURATION of a @WITHIN@ (or the offset of an
     -- @AFTER@)? There @OF@ introduces the edge's anchor — @WITHIN 5 OF THE
@@ -86,9 +95,9 @@ data Env = Env
     -- inside the anchor itself ('inExprSlot'). Everywhere else it is
     -- 'False' — including inside a @BEFORE@, which takes no anchor.
     --
-    -- 'memoGroup' keys on this field. It is one of two fields any parser
-    -- changes with 'local'; the other is 'clauseCtx', which the memo does
-    -- not need to key on, for the reason given there.
+    -- 'memoGroup' keys on this field. It is one of three fields any parser
+    -- changes with 'local'; the others are 'clauseCtx' and 'mixfixHints',
+    -- which the memo does not need to key on, for the reasons given there.
   , clauseCtx :: ClauseCtx
     -- ^ Where a rule parsed here sits, which decides whether it takes a
     -- @HENCE@ or @LEST@ written on a later line (smucclaw/l4-ide#1068; see
@@ -143,8 +152,9 @@ data PState = PState
   , nonassertables :: [Nonassertable]
   , langs :: [LangTag]
     -- ^ @\@lang@ declarations seen, most recent first. A list rather than a
-    -- 'Maybe' so that a second declaration is a fact we could report on later
-    -- rather than one silently overwriting the other.
+    -- 'Maybe', so that a second declaration does not silently overwrite the
+    -- first. Only the tags are kept; 'overriddenLangWarnings' reports a
+    -- conflict from the token stream, which has each line's range.
   }
   deriving stock (Show, Eq, Generic)
   deriving (Semigroup, Monoid) via Generically PState
@@ -192,9 +202,9 @@ langP = hidden $ spacedTokenWs langTagOfToken "Language declaration"
 -- | The language tag a @\@lang@ token carries, if that is what this token is.
 --
 -- Factored out so that the two things that read a @\@lang@ declaration — the
--- parser, through 'langP', and 'declaredModuleLang', which scans a bare token
--- stream — agree on what the token looks like by construction rather than by
--- both being edited together.
+-- parser, through 'langP', and 'redundantLangEnRanges', which scans a bare
+-- token stream — agree on what the token looks like by construction rather
+-- than by both being edited together.
 langTagOfToken :: TokenType -> Maybe LangTag
 langTagOfToken = \ case
   TAnnotations (TLang tag _) -> Just tag
@@ -207,8 +217,7 @@ langTagOfToken = \ case
 -- 'execParserForTokensWithHints' applies below: it takes @listToMaybe
 -- pstate.langs@, and 'addLang' accumulates by prepending, so that head IS the
 -- last one written. Stated in both places because the two have different
--- inputs (a token list here, the parser state there); they are checked against
--- each other by @jl4-test@'s corpus, every file of which goes through both.
+-- inputs (a token list here, the parser state there).
 --
 -- This exists because a consumer downstream of the parse — @l4 render@, which
 -- labels its HTML @<html lang="…">@ — needs the declaration itself, not its
@@ -219,9 +228,9 @@ declaredModuleLang ts =
   listToMaybe [ tag | t <- reverse ts, Just tag <- [langTagOfToken t.payload] ]
 
 -- | The ranges of the @\@lang en@ lines that say nothing the module does not
--- already say, read off the token stream like 'declaredModuleLang'.
+-- already say, read off the token stream.
 --
--- A module that declares no @\@lang@ is English ('defaultModuleLang', R-M2), so
+-- A module that declares no @\@lang@ is English ('defaultModuleLang'), so
 -- a declaration of @en@ changes nothing. That holds only while EVERY
 -- declaration in the module is @en@: the last declaration wins, so in a
 -- module that also says @\@lang he@ an @en@ line is not redundant (written
@@ -240,6 +249,100 @@ redundantLangEnRanges ts
   | otherwise = []
   where
     decls = [ (t.range, tag) | t <- ts, Just tag <- [langTagOfToken (computedPayload t)] ]
+
+-- | The @\@lang@ lines that name a different language from the module's last
+-- one, which is the one in force ('declaredModuleLang', and the
+-- @listToMaybe pstate.langs@ in 'execParserForTokensWithHints').
+--
+-- One warning per such line, carrying that line and the winning line. A line
+-- that repeats the winning tag is not reported, because it contradicts nothing:
+-- the module says the same thing twice.
+--
+-- Read off the token stream, like 'redundantLangEnRanges', so the two agree
+-- on what a @\@lang@ line is ('langTagOfToken'), and so the warning has the
+-- line's range, which the parser state does not keep.
+overriddenLangWarnings :: [PosToken] -> [Resolve.Warning]
+overriddenLangWarnings ts = case reverse decls of
+  [] -> []
+  winner : earlier ->
+    [ Resolve.LangOverridden line winner
+    | line <- reverse earlier
+    , line.payload /= winner.payload
+    ]
+  where
+    decls =
+      [ Resolve.WithSpan (fromSrcRange t.range) tag
+      | t <- ts
+      , Just tag <- [langTagOfToken (computedPayload t)]
+      ]
+
+-- | The percent pairs in an annotation's text that have spaces inside them
+-- around one name, each as @(the pair as written, the name)@.
+--
+-- A slot is @%name%@ with no spaces ('nameRefP'), so @% amount %@ is plain
+-- text and the author's slot is lost without a message. Three things keep the
+-- test from firing on prose:
+--
+-- * a tight slot is consumed whole, so the percent signs of @%amount%@ never
+--   pair with a neighbour;
+--
+-- * a pair whose closing @%@ runs into a word, as in @5% with %amount%@, is
+--   not reported: that is the literal percent sign the tight rule exists to
+--   protect (smucclaw\/l4-ide#957), not a slot with stray spaces;
+--
+-- * a backslash escape ('isNlgEscapable') is skipped, so @\\%@ is a literal
+--   percent sign and never opens a pair.
+--
+-- A name is an identifier or a backtick-quoted name, which is what a tight
+-- slot takes. It is read off the text, because that is all there is by the
+-- time the annotation has parsed: the spaced pair is never a node.
+spacedSlotsIn :: Text -> [(Text, Text)]
+spacedSlotsIn = go . Text.unpack
+  where
+    go :: String -> [(Text, Text)]
+    go = \ case
+      [] -> []
+      '\\' : c : rest | isNlgEscapable c -> go rest
+      '%' : rest
+        | Just (_, '%' : after) <- slotName rest -> go after
+        | Just (written, nm, after) <- spaced rest -> (Text.pack ('%' : written), Text.pack nm) : go after
+        | otherwise -> go rest
+      _ : rest -> go rest
+
+    spaced :: String -> Maybe (String, String, String)
+    spaced rest = do
+      let (leading, afterLeading) = span isSpace rest
+      (nm, afterName) <- slotName afterLeading
+      let (trailing, afterTrailing) = span isSpace afterName
+      '%' : after <- Just afterTrailing
+      guard (not (null leading && null trailing))
+      guard (not (runsIntoWord after))
+      pure (leading <> nm <> trailing <> "%", nm, after)
+
+    runsIntoWord = \ case
+      c : _ -> isAlphaNum c || c `elem` ['_', '\'', '`']
+      [] -> False
+
+    slotName :: String -> Maybe (String, String)
+    slotName = \ case
+      '`' : rest
+        | (inside@(_ : _), '`' : after) <- break (== '`') rest -> Just ('`' : inside <> "`", after)
+      c : rest
+        | isAlpha c || c == '_' ->
+            let (more, after) = span (\ x -> isAlphaNum x || x == '_' || x == '\'') rest
+            in Just (c : more, after)
+      _ -> Nothing
+
+-- | One 'Resolve.SpacedSlot' per spaced percent pair, read off the token
+-- stream like 'overriddenLangWarnings', so the warning carries the range of
+-- the annotation, which the parser state does not keep.
+spacedSlotWarnings :: [PosToken] -> [Resolve.Warning]
+spacedSlotWarnings ts =
+  [ Resolve.SpacedSlot (Resolve.WithSpan (fromSrcRange t.range) written) nm
+  | t <- ts
+  , TAnnotations (TNlg _ text _) <- [computedPayload t]
+  , (written, nm) <- spacedSlotsIn text
+  ]
 
 refP :: Parser (Epa Ref)
 refP = do
@@ -844,7 +947,10 @@ withTypeSig p = do
   p sig
 
 directive :: Parser (Directive Name)
-directive =
+directive = do
+  -- The column of the directive's first token. An #ASSERT REFUSED's BECAUSE
+  -- on a line of its own is measured against it ('assertRefusedReason').
+  current <- Lexer.indentLevel
   attachAnno $
     choice
       -- Use singleLineExpr for simple directives to make them line-oriented.
@@ -877,13 +983,15 @@ directive =
       -- decided statically in 'evalDirective' without evaluating the payload; a
       -- payload the evaluator cannot read statically would silently degrade to
       -- "no constraint", i.e. an assertion that holds for ANY refusal reason.
-      -- So a non-literal payload is a parse error, not a vacuous success.
+      -- So a non-literal payload is a parse error, not a vacuous success, and
+      -- so is a BECAUSE that a BREACH in the expression would take as its own
+      -- ('assertRefusedSubject'): the directive would then name no reason.
       , tryParser $
           AssertRefused emptyAnno
           <$ annoLexeme (spacedToken_ (TDirectives TAssertDirective))
           <* annoLexeme (spacedKeyword_ TKRefused)
-          <*> annoHole singleLineExpr
-          <*> optionalWithHole (annoLexeme (spacedKeyword_ TKBecause) *> annoHole lit)
+          <*> annoHole assertRefusedSubject
+          <*> optionalWithHole (assertRefusedReason current)
       , Assert emptyAnno
           <$ annoLexeme (spacedToken_ (TDirectives TAssertDirective))
           <*> annoHole singleLineExpr
@@ -891,6 +999,71 @@ directive =
 
 contractEvents :: AnnoParser [Expr Name]
 contractEvents = annoHole $ lmany (const expr)
+
+-- | The expression of an @#ASSERT REFUSED@.
+--
+-- A BECAUSE inside it can only be a BREACH's ('breach' reads one, and reads
+-- it greedily), and outside parentheses it reads as the directive's own: in
+-- @#ASSERT REFUSED IF c THEN REFUSE "a" ELSE BREACH BECAUSE "b"@ the reason
+-- "b" goes to the BREACH, the directive names no reason, and it holds for a
+-- refusal with any reason. So a BECAUSE outside every pair of parentheses in
+-- the expression is an error, at that BECAUSE.
+--
+-- The error is registered rather than raised, so that it is the directive's
+-- one error: a failure here would be caught by the 'tryParser' around the
+-- directive, and the line read again as a plain #ASSERT.
+assertRefusedSubject :: Parser (Expr Name)
+assertRefusedSubject = do
+  start <- getOffset
+  (toks, e) <- match singleLineExpr
+  for_ (unbracketedBecause toks) \ i ->
+    registerParseError $ FancyError (start + i) $ Set.singleton $ ErrorFail $ Text.unpack $ Text.unlines
+      [ "This BECAUSE belongs to the BREACH before it, and not to the #ASSERT REFUSED."
+      , "Inside an #ASSERT REFUSED, write a BREACH that has a BECAUSE in parentheses:"
+      , ""
+      , "  #ASSERT REFUSED (... BREACH BECAUSE \"...\")"
+      , ""
+      , "To name the reason the refusal must give, put the expression in parentheses, and the BECAUSE after them:"
+      , ""
+      , "  #ASSERT REFUSED (... BREACH) BECAUSE \"...\""
+      ]
+  pure e
+ where
+  -- the position, among the tokens, of the first BECAUSE outside every pair
+  -- of parentheses
+  unbracketedBecause :: [PosToken] -> Maybe Int
+  unbracketedBecause = go (0 :: Int) 0
+   where
+    go _ _ [] = Nothing
+    go depth i (t : ts) = case t.payload of
+      TSymbols TPOpen                     -> go (depth + 1) (i + 1) ts
+      TSymbols TPClose                    -> go (depth - 1) (i + 1) ts
+      TKeywords TKBecause | depth <= 0    -> Just i
+      _                                   -> go depth (i + 1) ts
+
+-- | The BECAUSE clause of an @#ASSERT REFUSED@, given the column of the
+-- directive's first token.
+--
+-- A BECAUSE on the directive's own line is always to the right of it. One
+-- that starts a line of its own continues the directive only when it starts
+-- at a column further right than the directive's. Columns are counted as
+-- everywhere in L4's layout, a tab bringing the indentation to the next
+-- multiple of eight and any other whitespace character adding one, and the
+-- service's text filter counts them the same way when it keeps a directive's
+-- lines together, so the two agree on whether a line is indented further
+-- than the directive. A BECAUSE further left is an error, at the BECAUSE,
+-- registered so that it is the directive's one error.
+assertRefusedReason :: Pos -> AnnoParser (Expr Name)
+assertRefusedReason current = wrapAnnoParser $ do
+  off <- getOffset
+  col <- Lexer.indentLevel
+  r <- unwrapAnnoParser (annoLexeme (spacedKeyword_ TKBecause) *> annoHole (lit <?> "String Literal"))
+  when (col <= current) $
+    registerParseError $ FancyError off $ Set.singleton $ ErrorFail $ Text.unpack $ Text.unlines
+      [ "A BECAUSE that starts a line belongs to the #ASSERT REFUSED above it only when it is indented further than the #ASSERT."
+      , "Indent this line, or move the BECAUSE onto the line of the #ASSERT."
+      ]
+  pure r
 
 import' :: Parser (Import Name)
 import' =
@@ -1002,7 +1175,7 @@ decide sig = do
           <*  annoLexeme (spacedKeyword_ TKDecide)
           <*> annoHole appForm
           <*  annoLexeme (spacedKeyword_ TKIs <|> spacedKeyword_ TKIf)
-          <*> annoHole (clauseBody current)
+          <*> annoHole (clauseBody sig current)
 
     meansKW current =
       attachAnno $
@@ -1010,7 +1183,7 @@ decide sig = do
           <$> annoHole (pure sig)
           <*> annoHole appForm
           <*  annoLexeme (spacedKeyword_ TKMeans)
-          <*> annoHole (clauseBody current)
+          <*> annoHole (clauseBody sig current)
 
 -- ----------------------------------------------------------------------------
 -- Pattern matching in function definitions (Phase 1)
@@ -1085,7 +1258,7 @@ decidePatternMatch sig = do
     -- the resulting Decide's annotation, and drop the hole for the fused body, so
     -- @l4 format@ round-trips the source (see 'desugarPatternClauses').
     (rawToks, (firstClause, rest, restStarts)) <- match $ do
-      firstClause <- pmClause clauseCol
+      firstClause <- pmClause sig clauseCol
       let firstHead  = pmHead firstClause
           firstArity = length (pmPats firstClause)
       rest <- many (try (withIndent EQ clauseCol (\ _ -> (,) <$> getOffset <*> sameHeadClause clauseCol firstHead firstArity)))
@@ -1128,7 +1301,7 @@ decidePatternMatch sig = do
     pure (desugarPatternClauses sig rawToks firstClause rest)
   where
     sameHeadClause clauseCol h ar = do
-      c <- pmClause clauseCol
+      c <- pmClause sig clauseCol
       guard (rawName (pmHead c) == rawName h && length (pmPats c) == ar)
       pure c
     clauseIsPatternMatching c = any isDistinguishablePat (pmPats c)
@@ -1319,8 +1492,8 @@ recordRunFailure p =
 -- @head pats MEANS body@ form. Argument patterns are parsed with
 -- 'atomicPattern', so applied constructors must be parenthesised (as in
 -- Haskell), e.g. @(JUST n)@ or @(x FOLLOWED BY xs)@.
-pmClause :: Pos -> Parser PMClause
-pmClause clauseCol =
+pmClause :: TypeSig Name -> Pos -> Parser PMClause
+pmClause sig clauseCol =
       pmDecideForm
   <|> pmMeansForm
   where
@@ -1331,31 +1504,42 @@ pmClause clauseCol =
       ps <- pmArgs
       ak <- optional aka
       _  <- spacedKeyword_ TKIs <|> spacedKeyword_ TKIf
-      b  <- clauseBody clauseCol
+      b  <- clauseBody sig clauseCol
       pure (PMClause hd ps ak b)
     pmMeansForm = do
       hd <- name
       ps <- pmArgs
       ak <- optional aka
       _  <- spacedKeyword_ TKMeans
-      b  <- clauseBody clauseCol
+      b  <- clauseBody sig clauseCol
       pure (PMClause hd ps ak b)
 
--- | The body of a @DECIDE@ or @MEANS@ clause that starts in column @col@,
--- parsed at most once per position ('memoGroupAt'). Every definition is read
--- first as a clause ('pmClause', for 'decidePatternMatch') and, unless it
--- starts a clause group, again as an ordinary definition ('decide'); both
--- readings parse the same body at the same position with the same column,
--- so the second replays the first instead of parsing the body again.
+-- | The body of a @DECIDE@ or @MEANS@ clause that starts in column @col@, in a
+-- rule with this signature, parsed at most once per position ('memoGroupAt').
+-- Every definition is read first as a clause ('pmClause', for
+-- 'decidePatternMatch') and, unless it starts a clause group, again as an
+-- ordinary definition ('decide'); both readings parse the same body at the
+-- same position with the same column and the same signature, so the second
+-- replays the first instead of parsing the body again.
 --
 -- The body's 'clauseCtx' is @'topClauseCtx' col@, set inside the memo so the
 -- memoised parser depends on nothing but the position and @col@: the outermost
 -- rule of a definition takes any @HENCE@ or @LEST@ written right of the
 -- definition.
-clauseBody :: Pos -> Parser (Expr Name)
-clauseBody col =
+--
+-- The body reads the mixfix words with the rule's own inputs shadowed
+-- ('shadowMixfixWords'), also inside the memo. That makes the memoised parser
+-- depend on the signature as well, which the position already fixes: a body
+-- follows one signature, in every reading of it (smucclaw\/l4-ide#1076).
+clauseBody :: TypeSig Name -> Pos -> Parser (Expr Name)
+clauseBody sig col =
   memoGroupAt (unPos col) #clauseBodies
-    (local (\ e -> e { clauseCtx = topClauseCtx col }) (indentedExpr col))
+    (local (\ e -> e { clauseCtx = topClauseCtx col
+                     , mixfixHints = shadowMixfixWords inputWords e.mixfixHints
+                     })
+           (indentedExpr col))
+  where
+    inputWords = map rawName (givenTermNames sig)
 
 
 -- | Extract the term (value) parameter names from a GIVEN signature, skipping
@@ -1789,11 +1973,13 @@ type GroupReply a = Megaparsec.Reply Void TokenStream (a, PState)
 --     replayed state was only advanced to offsets at or below the group's
 --     end, which is where parsing resumes;
 --
---   * of the 'Env', only 'ofIsAnchor' and 'clauseCtx' are ever changed
---     with 'local', and no memoised parser's reply depends on the 'clauseCtx'
---     it was reached with (see there); the module's URI and the
---     mixfix hints are fixed for a whole run, and so is this memo, which a
---     run starts empty ('runJl4Parser');
+--   * of the 'Env', only 'ofIsAnchor', 'clauseCtx' and 'mixfixHints' are ever
+--     changed with 'local', and no memoised parser's reply depends on the
+--     'clauseCtx' it was reached with (see there); 'clauseBody' sets
+--     'mixfixHints' from the signature of the rule whose body it parses, which
+--     is the same for every reading of a position, so the hints a position is
+--     read with are fixed too; the module's URI is fixed for a whole run, and
+--     so is this memo, which a run starts empty ('runJl4Parser');
 --
 --   * nothing reads the collected annotations ('PState') or megaparsec's
 --     delayed errors while parsing; they are only ever added to, at the
@@ -3221,15 +3407,18 @@ breach = do
 -- | Parse @REFUSE "message"@.
 --
 -- The message is a LITERAL, not an arbitrary expression. That is deliberate:
--- a refusal's reason is meant to be statically readable (so it can be reported
--- without running the program), and a literal payload means 'Refuse' needs no
--- machine 'Frame' and so no 'unwindFrame' arm. @REFUSE 42@ parses and is
--- rejected by the type checker; @REFUSE (something computed)@ does not parse.
+-- a refusal's reason is statically readable (so it can be reported without
+-- running the program), and a literal payload means 'Refuse' needs no machine
+-- 'Frame' to carry it. @REFUSE 42@ parses and is rejected by the type checker;
+-- @REFUSE (something computed)@ does not parse.
+--
+-- The label keeps the parse error to the one thing that works: without it the
+-- error lists the numeric literals too, which the type checker then refuses.
 refuse :: Parser (Expr Name)
 refuse = attachAnno $
   Refuse emptyAnno
     <$  annoLexeme (spacedKeyword_ TKRefuse)
-    <*> annoHole lit
+    <*> annoHole (lit <?> "String Literal")
 
 optionalWithHole :: HasSrcRange a => AnnoParser a -> AnnoParser (Maybe a)
 optionalWithHole p = Just <$> p <|> annoHole (pure Nothing)
@@ -4214,21 +4403,21 @@ execParserForTokensWithHints = execParserForTokensWith True
 execParserForTokensWith :: (Resolve.HasNlg a, Resolve.HasDesc a, Resolve.HasRef a, Resolve.HasFixity a, Resolve.HasNonassertable a) => Bool -> MixfixHintRegistry -> Parser a -> NormalizedUri -> Text -> [PosToken] -> Either (NonEmpty PError) (a, [Resolve.Warning], PState)
 execParserForTokensWith memoise hints p file input ts =
   case runJl4Parser env st p (showNormalizedUri file) stream  of
-    Left err -> Left (fmap (mkPError "parser") $ errorBundleToErrorMessages err)
+    Left err -> Left (bundleToPErrors "parser" (Just . tokenKindSlug . computedPayload) err)
     Right (a, pstate)  ->
       let
-        -- The module's declared language, or `en` (R-M2). Taken as the
-        -- LAST declaration in source order: `langs` accumulates by
-        -- prepending, so the head is the last one written. Two declarations
-        -- in one module is not diagnosed here — the list keeps both, so a
-        -- check for it has something to read.
+        -- The module's declared language, or `en`. Taken as the LAST
+        -- declaration in source order: `langs` accumulates by prepending, so
+        -- the head is the last one written. Two declarations that name
+        -- different languages are reported by 'overriddenLangWarnings', which
+        -- reads the token stream because it needs each line's range.
         moduleLang = fromMaybe defaultModuleLang (listToMaybe pstate.langs)
         -- Stamp every untagged annotation with it BEFORE attachment, which is
         -- what makes `@lang he` mean exactly "tag every herald in this module
         -- `:he`" rather than a second mechanism with its own precedence — and
         -- makes it order-independent, since pstate is complete by now.
         localisedNlgs = fmap (withDefaultLang moduleLang) pstate.nlgs
-        (withNlg, nlgS) = Resolve.addNlgCommentsToAst moduleLang localisedNlgs a
+        (withNlg, nlgS) = Resolve.addNlgCommentsToAst moduleLang pstate.langs localisedNlgs a
         (withDesc, _descS) = Resolve.addDescCommentsToAst pstate.descs withNlg
         (withFixity, fixityS) = Resolve.addFixityCommentsToAst pstate.fixities withDesc
         (withNonassertable, naS) = Resolve.addNonassertableCommentsToAst pstate.nonassertables withFixity
@@ -4237,7 +4426,7 @@ execParserForTokensWith memoise hints p file input ts =
         fixityWarnings = fmap Resolve.renderFixityWarning fixityS.fixityWarnings
         naWarnings = fmap Resolve.renderNonassertableWarning naS.nonassertableWarnings
       in
-        Right (annotatedA, nlgS.warnings ++ refWarnings ++ fixityWarnings ++ naWarnings, pstate)
+        Right (annotatedA, overriddenLangWarnings ts ++ spacedSlotWarnings ts ++ nlgS.warnings ++ refWarnings ++ fixityWarnings ++ naWarnings, pstate)
   where
     env = Env
       { moduleUri = file
