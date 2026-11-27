@@ -441,18 +441,54 @@ Full treatment, including the state-graph behaviour and the measured sharp edges
 For recurring payments (loans, subscriptions, installments), define a function that emits the next period's obligation:
 
 ```l4
+DECLARE Party IS ONE OF `The Borrower`
+DECLARE Action IS ONE OF pay HAS amount IS A NUMBER
+
+`monthly installment` MEANS 100
+`late penalty` MEANS 10
+
 GIVEN remainingBalance IS A NUMBER
-`monthly payments` MEANS
+GIVETH A DEONTIC Party Action
+`monthly payments` remainingBalance MEANS
     IF remainingBalance GREATER THAN 0
     THEN PARTY `The Borrower`
          MUST pay `monthly installment`
-         WITHIN `next due date`
+         WITHIN 30
          HENCE `monthly payments` (remainingBalance MINUS `monthly installment`)
          LEST  `monthly payments` (remainingBalance PLUS `late penalty`)
     ELSE FULFILLED
+
+#TRACE `monthly payments` 200 AT 0 WITH
+    PARTY `The Borrower` DOES pay 100 AT 20
+    PARTY `The Borrower` DOES pay 100 AT 45
+-- Result: FULFILLED
 ```
 
-The `HENCE` branch reduces the balance; the `LEST` branch increases it with a penalty and re-emits the obligation. The recursion base is `FULFILLED`.
+The `HENCE` branch reduces the balance; the `LEST` branch increases it with a penalty and re-emits the obligation. The recursion base is `FULFILLED`. `` `monthly installment` `` names a constant, so the action refers to it ([Reference and wildcard names](#reference-and-wildcard-names)): a payment of 50 does not discharge a rung.
+
+L4 checks every rule whose `HENCE` or `LEST` leads back to itself, and gives one of three warnings (`doc/reference/regulative/rules-that-start-themselves-again.md` quotes each):
+
+- **"I could not check that this comes to an end"** when it cannot see that each new copy waits, for an event or for a deadline written as a number above 0.
+  The example above checks clean, because its deadline is the number 30 written out.
+  Write `` WITHIN `next due date` `` in its place, and define the name, and it draws the warning unless `` `next due date` `` is a number written out in the same file: `` `next due date` MEANS 30 `` checks clean, and `` `next due date` MEANS 15 PLUS 15 `` warns (measured 2026-11-28 on the dev build), because L4 reads only a number written out there.
+  With no definition of the name at all it is an error (`check/unknown-identifier`), not this warning.
+  If the rule does come to an end, write `@ends-because <reason>` on a line of its own above the rule the warning is shown on (the first, in the file, of rules that lead back to each other).
+  That silences this warning only, and L4 shows the reason in an information message instead.
+  A mark above another rule of the loop does not count.
+- **"starts itself again with no time passing"** for a deadline of `WITHIN 0` (or before the start) on the way round.
+  `@ends-because` cannot silence it: give the deadline time.
+- **"starts 2 copies of itself at once"** for a `HENCE` or `LEST` that joins two or more uses of the loop's rules with `RAND` or `ROR`.
+  It is shown on the rule whose `HENCE` or `LEST` starts the copies.
+  `@ends-because` cannot silence it either.
+
+A rule that uses itself only directly, with no `HENCE` or `LEST` that leads back to it (a countdown, a fold over a list), draws none of these, and an `@ends-because` above it changes nothing.
+One that uses itself directly and also has a `HENCE` or `LEST` back to itself is checked, direct uses and all, and can draw "could not check".
+L4 cannot see a loop through a rule kept in a record or passed in as an input: such an obligation draws no warning, and an `@ends-because` above it draws a warning that L4 finds no way back to itself from the rule, though the mark may be right.
+Every mark still gets one information message carrying its reason and saying what it did.
+A file with an error gets none of these warnings or messages.
+
+When "could not check" is about a rule that uses itself directly, the warning names that rule, which need not be the one it is shown on.
+The doubt is then about that direct use, not about a `HENCE` or `LEST`, and the warning says so; a mark answers it as it answers any other "could not check".
 
 ---
 

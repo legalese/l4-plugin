@@ -9,6 +9,7 @@ module L4.EvaluateLazy.Machine
 , Machine
 , Eval
 , EvalState (..)
+, NormLogMutant (..)
 , Stack (..)
 , emptyStack
 , runEval
@@ -18,6 +19,15 @@ module L4.EvaluateLazy.Machine
 -- * The step counter and the unknowns a directive reached (UNKNOWN-EVALUATION-SPEC §4.5, build step 3)
 , tickUnknownSteps
 , resetUnknownSteps
+, resetBudget
+, withTracedWorkLimit
+, budgetSpent
+, moduleRules
+, runStoppedAt
+, noteRunStopped
+, tickLimits
+, DirectiveLimits (..)
+, LimitClock (..)
 , reachedUnknowns
 , unknownNames
 , withPoppedFrame
@@ -29,6 +39,7 @@ module L4.EvaluateLazy.Machine
 , getModuleUri
 , getSafeMode
 , formatUTCTimeIso
+, getAnswerInJust
 -- * The string parsers TODATE, TOTIME and TODATETIME use, for callers that must
 -- agree with them (jl4-service names the input one of them refused).
 , parseDateText
@@ -40,6 +51,7 @@ module L4.EvaluateLazy.Machine
 -- * The deontic step log (LTS-VISUALISER §4.3, P2b). 'tellDeonticStep' is
 -- the write; the capture lives in 'L4.EvaluateLazy'.
 , tellDeonticStep
+, flushArmedFinal
 , partyKeyWHNF
 -- * What the marking (LTS-VISUALISER §4.2a, P2c) needs to read a residual:
 -- the barrier sentinels' names and the FULFILLED view.
@@ -58,6 +70,7 @@ module L4.EvaluateLazy.Machine
 , Presumed (..)
 , PresumedOrigin (..)
 , PresumedLog
+, presumedOwner
 , emptyPresumedLog
 , presumedEvents
 , renderPresumedPath
@@ -108,6 +121,7 @@ import Data.Time (UTCTime)
 import qualified Data.Time as Time
 import Data.Time.LocalTime (TimeOfDay(..), LocalTime(..), timeToTimeOfDay, timeOfDayToTime)
 import qualified Data.Time.Format as TimeFormat
+import Data.Time.Format.ISO8601 (iso8601Show)
 import qualified Data.Time.Zones as TZ
 import L4.Annotation
 import L4.Evaluate.Ledger
@@ -119,6 +133,7 @@ import L4.Evaluate.Ledger
   , anonymousParty
   , readCellBitemporal
   , readCellAllBitemporal
+  , storeAppendNorm
   , storeAppendOfficial
   , storeAppendOwn
   , storeOwnLedger
@@ -126,19 +141,26 @@ import L4.Evaluate.Ledger
 import L4.Evaluate.Operators
 import L4.Evaluate.ValueLazy
 import L4.TemporalContext (CtxReads (..), EvalClause (..), ReadObs (..), TemporalContext (..), applyEvalClauses, hasReads, noReads, validFor)
-import L4.Parser.SrcSpan (SrcRange, prettySrcRangeM)
+import Control.Applicative ((<|>))
+import Data.Ord (comparing)
+import qualified Optics
+import L4.Parser.SrcSpan (SrcRange (..), prettySrcRangeM)
 import L4.Print hiding (tryLoadTZPure, formatDateTimeIso)
 import L4.Syntax
 import qualified L4.TypeCheck as TypeCheck
 import L4.TypeCheck.Types (EntityInfo)
 import L4.EvaluateLazy.ContractFrame
+import L4.Evaluate.NormLog
 import L4.EvaluateLazy.DeonticStep hiding (Branch)
+import L4.EvaluateLazy.Fates
 import qualified L4.EvaluateLazy.DeonticStep as DS
 import L4.EvaluateLazy.Exceptions
 import L4.EvaluateLazy.SiblingReads
 import qualified L4.Lint.SiblingReads as Lint
-import L4.EvaluateLazy.Trace (EvalTraceAction (..))
+import L4.EvaluateLazy.Trace (EvalTrace, EvalTraceAction (..))
 import L4.Presumption
+import L4.TypeSynonym (substituteTypeParams)
+import L4.TypeCheck.Unify (synonymExpansionFuel)
 import L4.TracePolicy (TracePolicy)
 import qualified L4.TracePolicy as TracePolicy
 import L4.Utils.Ratio
@@ -146,6 +168,8 @@ import Text.Read (readMaybe)
 import qualified Data.Scientific as Sci
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Exception (SomeException, catch, fromException, throwIO, uninterruptibleMask_)
+import Data.Int (Int64)
+import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getAllocationCounter, setAllocationCounter)
 import qualified Control.Exception
 
@@ -233,6 +257,13 @@ data Frame =
   -- Note [Operands in step] and 'startCompound'.
   | Lockstep LockstepFrame
   | App1 {- -} [Reference] (Maybe (Type' Resolved)) -- Added type for type-directed builtins
+  -- smucclaw/l4-ide#1118: the 'App1' of an operand of a compound, which gives
+  -- the operand the time and the events. It is applied exactly as an 'App1'
+  -- is ('asApp1'). It is a frame of its own because the two mean different
+  -- things to a reference evaluated above them: above an 'App1' the reference
+  -- is the function being called, above this one it is the operand being
+  -- evaluated ('topFrameAppliesArguments').
+  | App1Operand {- -} [Reference] (Maybe (Type' Resolved))
   | IfThenElse1 {- -} (Expr Resolved) (Expr Resolved) Environment
   | ConnectiveLeft Connective (Maybe ConnRight) {- -}
     -- ^ the left operand of a built-in connective (NOT's only one) is being
@@ -326,6 +357,8 @@ data LockstepFrame = MkLockstepFrame
     -- ^ the sibling-read check's scope for this application of the compound
   , lsOp      :: RBinOp
   , lsEnv     :: Environment
+  , lsSite    :: Maybe SrcRange
+    -- ^ where the compound is in the source ('operandsSite')
   , lsTime    :: Reference
     -- ^ the compound's own time, every operand's first clock
   , lsType    :: Maybe (Type' Resolved)
@@ -403,11 +436,31 @@ data DynState = MkDynState
 -- and caught at directive boundaries via 'tryEval'.
 -- ----------------------------------------------------------------------------
 
+-- | The deliberately wrong writers of the observer test (NORM-LOG-SPEC N6).
+-- A differential that can only pass proves nothing, so each of these makes
+-- the writer do something an observer must not, and the test that the
+-- writer is an observer is shown to fail on it. Never set outside a test.
+data NormLogMutant
+  = NoMutant
+  | MutantOfficial
+    -- ^ every fate also appends to the OFFICIAL ledger, where @RECALL@ and
+    -- the printed listing see it
+  | MutantForce
+    -- ^ a norm's party, when it is still an unevaluated expression, is
+    -- evaluated when the norm is armed, which the machine does not do
+    -- (O1): a party that cannot be evaluated then fails a run that did
+    -- not need it
+  deriving stock (Eq, Show)
+
 data EvalState =
   MkEvalState
     { moduleUri  :: !NormalizedUri
     , stack      :: !(IORef Stack)
     , supply     :: !(IORef Int)   -- used for uniques and addresses
+    , instantSupply :: !(IORef Int)
+                                     -- ^ how many instant carriers (@THE INSTANT@, one per
+                                     -- guard evaluation) this evaluation has made; the
+                                     -- next one's index in 'instantCarrierAddress'
     , evalTrace  :: !(Maybe (IORef (DList EvalTraceAction)))
     , envLedger  :: !(IORef LedgerStore) -- append-only event store (M0 substrate, M4
                                          -- per-party + official record); always collected
@@ -428,6 +481,17 @@ data EvalState =
                                      -- ^ the time of each compound that started while
                                      -- its time was still a thunk, by scope, until it is
                                      -- found evaluated ('siblingCheck')
+    , normLog :: !Bool
+                                     -- ^ NORM-LOG-SPEC N6: the norm log writer is on for this
+                                     -- evaluation ('L4.EvaluateLazy.EvalConfig'); read by
+                                     -- the directive driver, which then installs a log that
+                                     -- writes fates
+    , normLogMutant :: !NormLogMutant
+                                     -- ^ TEST ONLY: see 'L4.EvaluateLazy.EvalConfig'
+    , normLogForce :: !(Environment -> Expr Resolved -> Eval ())
+                                     -- ^ TEST ONLY: evaluates an expression on a stack of
+                                     -- its own; what 'MutantForce' calls. Set by the
+                                     -- directive driver, which is where 'runConfig' is
     , operandsInStep :: !Bool
                                      -- ^ smucclaw/l4-ide#1069: run a @RAND@'s operands in
                                      -- step (Note [Operands in step]). 'False' only to
@@ -473,6 +537,55 @@ data EvalState =
       -- ^ UNKNOWN-EVALUATION-SPEC §4.5's step counter (C4): negative until a
       -- site of §4.3's table first receives a term in this directive, then
       -- the machine steps still allowed. Reset per directive.
+    , armings :: !(IORef Int)
+      -- ^ smucclaw/l4-ide#1075: the obligations this directive has armed
+      -- ('noteArming'). Reset per directive.
+    , closes :: !(IORef Int)
+      -- ^ the armed obligations this directive has closed: handed on to a
+      -- HENCE or LEST, breached with no LEST ('noteClose'), or thrown away
+      -- still waiting when the compound or barrier holding them was decided
+      -- ('noteDropped'). @armings - closes@ is the number open: Note [What
+      -- the open count counts]. Kept apart from 'armings' so that a missed
+      -- close shows as a count that grows with the trace.
+    , applications :: !(IORef Int)
+      -- ^ the work this directive has done: applications of L4 functions
+      -- ('noteApplication') and deontic hand-offs ('noteHandoff'), in one
+      -- total. Reset per directive.
+    , openLimit :: !(Maybe Int)
+      -- ^ the open number: the most obligations a directive may have open
+      -- at once ('OpenObligations'), and the most failures one join may
+      -- gather ('JoinedBreaches'); 'Nothing' sets no limit
+    , applicationLimit :: !(Maybe Int)
+      -- ^ the work number: the most function applications and deontic
+      -- hand-offs a directive may make, in all ('ClosureApplications');
+      -- 'Nothing' sets no limit
+    , tracedApplicationLimit :: !(Maybe Int)
+      -- ^ the work number for a directive that collects a trace, which
+      -- 'withTracedWorkLimit' puts in 'applicationLimit''s place. The same
+      -- as 'applicationLimit' unless the configuration says otherwise
+      -- ('L4.EvaluateLazy.withTracedWorkNumber')
+    , usualApplicationLimit :: !(Maybe (Maybe Int))
+      -- ^ while a directive that collects a trace runs under a work number
+      -- of its own that is not the usual one ('withTracedWorkLimit'), the
+      -- usual one, which its stop's message names; 'Nothing' otherwise
+    , budgetRules :: [(SrcRange, Text)]
+      -- ^ the module's own definitions, each with its name: what a budget
+      -- that goes over names its site by ('budgetSite'). Lazy, so it is
+      -- built only for a directive that goes over. Empty where the caller
+      -- has no module ('runEvalAction').
+    , runStopped :: !(IORef (Maybe (Budget, Maybe SrcRange)))
+      -- ^ set when a directive goes over the opt-in time or memory limit,
+      -- which stops the run (ruling L2): the limit, and that directive.
+      -- Every later directive is refused ('runStoppedAt'). The caller's
+      -- ('EvalConfig.runStop') where it gives one, so that it spans every
+      -- module of the run, imports included; otherwise this module's own.
+    , directiveLimits :: !(Maybe DirectiveLimits)
+      -- ^ the opt-in time and allocation limits on each directive
+      -- (@--eval-timeout@, @--max-eval-memory-mb@); 'Nothing' when neither
+      -- is set, and then 'tickLimits' costs one field read per step
+    , limitClock :: !(IORef LimitClock)
+      -- ^ where this directive's time and allocation started, and how many
+      -- steps until 'tickLimits' next reads them. Reset per directive.
     , unknownReached :: !(IORef [Term])
       -- ^ every input, or field of one, that reached a §4.3 site in this
       -- directive, first first: what a directive that runs out of steps is
@@ -514,20 +627,33 @@ data EvalState =
       -- Each run gets its own registry ('L4.EvaluateLazy' builds a fresh
       -- 'EvalState' per evaluation), so concurrent requests share none of it.
       --
-      -- Known gap: a reader that peeks at a thunk without 'evalRef'
-      -- ('peekWHNF', 'peekNF'; the deontic machinery's reads of a party) sees
-      -- a decoder-filled default, which is a value from birth, without
-      -- reporting it.
+      -- Known gap: a reader that peeks at a thunk without 'evalRef' ('peekWHNF',
+      -- 'peekNF', 'peekName') sees a decoder-filled default, which is a value
+      -- from birth, without reporting it. The peeks feed only the deontic log and
+      -- a note's wording: the answer forces an event's party and action.
     , recordDefaults :: Map Unique (Map Text (Expr Resolved))
       -- ^ Each record type's field defaults, keyed by the type's 'Unique' and
       -- then by field name, from the @DECLARE@s of the evaluated module and of
       -- whatever modules the caller passed beside it. The JSON decoder fills an
       -- absent field from here (T1b). Static for the run, and deliberately
       -- lazy: only a run that decodes JSON pays for walking the modules.
+    , recordOwners :: Map Unique Text
+      -- ^ How a decode the rules make names a record type that is declared
+      -- under a section heading in the evaluated module: the type's declared
+      -- name behind its headings, spelled and quoted as the owner of a @WITH@
+      -- default is ('presumedOwner'), keyed by the type's 'Unique'. It is what
+      -- @JSONDECODE T: path@ in @presumed@ names, whatever spelling the decode
+      -- site used for the type. A type declared at the top of the module, or
+      -- in an imported module, is not here and is named as the site spelled it
+      -- (decision O6, assumed: the headings of an imported module do not
+      -- reach the evaluator). Static for the run, and lazy like 'recordDefaults'.
     , presumed :: !(IORef PresumedLog)
       -- ^ The defaults that took effect during this directive, in the order
       -- they were forced: W8's \"took its default\" event. Per directive,
       -- like 'notes' (swapped fresh by 'L4.EvaluateLazy.withFreshLedger').
+    , answerInJust :: !Bool        -- see 'L4.EvaluateLazy.EvalConfig'
+    , maxFrameDepth :: !Int        -- see 'maximumFrameDepth'
+    , tracePostprocessor :: [EvalTraceAction] -> EvalTrace  -- see 'L4.EvaluateLazy.EvalConfig'
     }
 
 -- | 'EvalState.presumed': the events in the order forced, and the ones seen,
@@ -576,8 +702,33 @@ data PresumedOrigin
   | FromDecode !Text
     -- ^ A field of a decode the RULES made, filled the same way; the text is
     -- the type that decode started from.
+  | FromNamedApp !Text
+    -- ^ An input or field a named application left out and the checker filled
+    -- from its @TYPICALLY@ ('DefaultFill'): W4 for a rule's inputs, W5 for a
+    -- record's fields. The text is the rule or record constructor the site
+    -- applies. The path is the one input or field.
   deriving stock (Eq, Ord, Show, Generic)
   deriving anyclass NFData
+
+-- | How the owner of a default reads in a @presumed@ entry: the way L4 writes
+-- the name in source ('L4.Print.quoteIfNeeded'), so that an entry can be split
+-- back into its parts and two different names do not print alike. A name
+-- behind the headings it is declared under is spelled as L4 spells a qualified
+-- name in an ambiguity error and when it prints source: each part that L4
+-- would write in backticks has them, so a heading with a space or a dot
+-- (@Part 1. Fees@) stays one part. A name with no heading in front of it is
+-- quoted the same way, so a top-level rule called @Pricing.scaled@ prints as
+-- @`Pricing.scaled`@ and not as the rule @scaled@ under @§ Pricing@.
+-- Two declarations with the same name under the same sections print the same
+-- entry: the entry names the sections, not the file, so the same name in two
+-- imported files shares one, and a @WHERE@ or @LET@ local, which is named
+-- bare, shares one with a top-level rule of that name.
+-- Assumed, not ruled: card O6 (ruled 2026-10-11) says the headings are named,
+-- and not how they are quoted.
+presumedOwner :: RawName -> Text
+presumedOwner = \ case
+  q@QualifiedName{} -> prettyLayout q
+  other             -> quoteIfNeeded (rawNameToText other)
 
 -- | Report a default that took effect ('EvalState.presumed'), once.
 tellPresumed :: Presumed -> Eval ()
@@ -672,9 +823,12 @@ type Machine = Eval
 -- allocation limit, a cancelled thread, a Haskell crash) leaves the frame
 -- stack as it was, because only 'raiseException' unwinds it; so the frames
 -- still on it are unwound here, and a thunk whose force was interrupted gets
--- its blackhole mark back ('unwindFrame'). Thunks of imported modules outlive
+-- its blackhole mark back ('unwindFrame'). Thunks of imported modules outlived
 -- the run, and a mark left on one made the next run on the same thread report
--- an infinite loop (smucclaw/l4-ide#1020).
+-- an infinite loop (smucclaw/l4-ide#1020). A directive now forces a copy of
+-- them ('L4.EvaluateLazy.forEachDirectiveFreshHeap', smucclaw/l4-ide#1116), so
+-- the mark lands on a copy; the unwinding stays for a force that reaches a heap
+-- some other way, such as 'L4.EvaluateLazy.evalExprForLedgerWithEnv'.
 --
 -- The unwinding is uninterruptible, so a second exception cannot cut it
 -- short, and it is cheap for the same reason: one walk over the frame list,
@@ -758,7 +912,214 @@ tellDeonticStep :: DeonticStep -> Eval ()
 tellDeonticStep step = whenDeonticLog \ l -> logStep l step
 
 logStep :: DeonticLog -> DeonticStep -> Eval ()
-logStep l step = liftIO (modifyIORef' l.dlSteps (`DList.snoc` step))
+logStep l step = do
+  when l.dlKeepSteps (liftIO (modifyIORef' l.dlSteps (`DList.snoc` step)))
+  when l.dlWriteFates do
+    -- a step that writes no fate (a look, such as the Waiting step a norm logs
+    -- when its events run out) has nothing to put the waiting 'Armed' rows
+    -- before, so it does not walk them: an EVERY of N members traced with no
+    -- events logs N such steps, and each walked all N (review of P1, cost)
+    case fatesOfStep step of
+      []    -> pure ()
+      fates -> flushArmed l >> for_ fates tellFate
+
+-- | NORM-LOG-SPEC N1/N13: a norm met its event stream, and nothing has
+-- happened to it yet. If its arming clock has been forced the entry is
+-- written now; if not (a root norm's clock is forced at its first event, and
+-- the writer never forces) it waits in 'dlPendingArmed' for 'flushArmed'.
+--
+-- @handoff@ is the stamp of the event that revealed the hand-off which armed
+-- the norm, when one did (N3, review of P1 W2): the norm took effect at the
+-- hand-off clock and was seen on that event, which for a @LEST@ is later.
+tellArmed :: DeonticLog -> NormKey -> Reference -> Maybe Rational -> Eval ()
+tellArmed l norm time handoff = do
+  at <- peekClock time
+  case at of
+    Just _  -> flushArmed l >> tellFate (armedEntry norm at handoff)
+    Nothing -> liftIO (modifyIORef' l.dlPendingArmed ((norm, time, handoff) :))
+
+-- | Write the pending 'Armed' entries whose clock has been forced since,
+-- oldest first, and keep the rest. The list is held newest first, so arming a
+-- norm is constant time (review of P1, cost).
+flushArmed :: DeonticLog -> Eval ()
+flushArmed l = do
+  pending <- liftIO (readIORef l.dlPendingArmed)
+  -- nothing is rebuilt unless some clock has been forced since
+  ready <- anyClockForced pending
+  when ready do
+    liftIO (writeIORef l.dlPendingArmed [])
+    results <- for (reverse pending) \ (norm, time, handoff) -> do
+      at <- peekClock time
+      case at of
+        Just _  -> Nothing <$ tellFate (armedEntry norm at handoff)
+        Nothing -> pure (Just (norm, time, handoff))
+    liftIO (modifyIORef' l.dlPendingArmed (reverse (catMaybes results) <>))
+
+-- | Has any of the waiting rows' clocks been forced? Peeks, allocates nothing
+-- that outlives the walk.
+anyClockForced :: [(NormKey, Reference, Maybe Rational)] -> Eval Bool
+anyClockForced = go
+  where
+    go [] = pure False
+    go ((_, time, _) : rest) = do
+      at <- peekClock time
+      case at of
+        Just _  -> pure True
+        Nothing -> go rest
+
+-- | At the end of a directive: write what is still pending with the clock
+-- as far as it is known, which for a norm that never saw an event is 'Nothing'.
+flushArmedFinal :: DeonticLog -> Eval ()
+flushArmedFinal l = do
+  flushArmed l
+  pending <- liftIO (readIORef l.dlPendingArmed)
+  liftIO (writeIORef l.dlPendingArmed [])
+  for_ (reverse pending) \ (norm, _, handoff) -> tellFate (armedEntry norm Nothing handoff)
+
+-- | Append a fate to the norm ledger (NORM-LOG-SPEC N5). Unlike a drafter's
+-- write it does not poison the force span ('noteLedgerWrite') and does not
+-- refuse under an unknown: the writer is an observer, and a fate is written
+-- exactly where the machine has already decided it, so re-forcing a thunk
+-- never re-writes one.
+tellFate :: NormEntry -> Eval ()
+tellFate e = do
+  store <- asks (.envLedger)
+  liftIO (modifyIORef' store (storeAppendNorm e))
+  -- the deliberately wrong writer of the observer test: it also writes where
+  -- a drafter's read and the printed listing can see it
+  mutant <- asks (.normLogMutant)
+  when (mutant == MutantOfficial) do
+    now <- asks (.evalTime)
+    let prov = MkProvenance {party = "", source = "COMMIT", txTime = now, vtFrom = Nothing}
+    liftIO (modifyIORef' store (storeAppendOfficial (Assign ["norm log"] (ValNumber 1) prov)))
+
+-- | A lifecycle with its parent link replaced. A constructor call, because
+-- a record update on @origin@ is ambiguous: 'CheckTiming' and 'Presumed' have
+-- a field of that name too.
+withOrigin :: Lifecycle -> Maybe Reference -> Lifecycle
+withOrigin lc o = MkLifecycle {join = lc.join, deadline = lc.deadline, armed = lc.armed, origin = o}
+
+-- | N8: register the norm a hand-off hands off from, and return the
+-- reference the continuation's environment binds ('lifecycleOriginUnique').
+-- 'Nothing' unless the norm log writer is on.
+handoffOrigin :: NormKey -> OriginBranch -> Maybe Rational -> Eval (Maybe Reference)
+handoffOrigin norm = registerOrigin (normBearerOf norm) norm
+
+-- | The same for an @EVERY@ join, which has no party: a bare @BREACH@ under
+-- a barrier names nobody (N7 rule 2).
+handoffOriginJoin :: NormKey -> OriginBranch -> Maybe Rational -> Eval (Maybe Reference)
+handoffOriginJoin = registerOrigin NobodyBearer
+
+-- | The key a hand-off's carrier holds: the log's epoch above the 40th bit
+-- and the entry's number below. A continuation shared from another evaluation
+-- carries another epoch, and 'decodeOrigin' refuses it (review of P1, W1).
+originKey :: DeonticLog -> Int -> Rational
+originKey l n = fromIntegral l.dlEpoch * 1099511627776 + fromIntegral n
+
+registerOrigin :: NormBearer -> NormKey -> OriginBranch -> Maybe Rational -> Eval (Maybe Reference)
+registerOrigin bearer norm branch observed = asks (.deonticLog) >>= \ case
+  Just l | l.dlWriteFates ->
+    Just <$> newCarrier l MkNormOrigin
+      { noParent = normRefOf norm, noParentModal = norm.nkModal
+      , noParentBearer = bearer, noBranch = branch } observed
+  _ -> pure Nothing
+
+-- | Register a parent link, with the stamp of the event that revealed the
+-- hand-off, and make the reference a continuation's environment binds for it.
+newCarrier :: DeonticLog -> NormOrigin -> Maybe Rational -> Eval Reference
+newCarrier l origin observed = do
+  n <- liftIO (atomicModifyIORef' l.dlOrigins \ m -> let k = Map.size m in (Map.insert k (origin, observed) m, k))
+  -- Not 'allocateValue': that takes the next address from the evaluation's
+  -- supply, and every printed party key that holds an unforced field names
+  -- its address, so a writer that allocated would change what a ledger
+  -- listing prints (found by the forced-on jl4-test run on
+  -- ok/every/run-lifecycle-values.l4). A negative address cannot clash.
+  uri <- asks (.moduleUri)
+  address <- maybe (userException (UserError "the norm log made more parent-link carriers than an evaluation can number")) pure
+    (originCarrierAddress n)
+  pointer <- liftIO (newIORef (WHNF (ValNumber (originKey l n))))
+  pure (MkReference (MkAddress uri address) pointer)
+
+-- | The environment a residual obligation keeps when its events run out. The
+-- parent link stays, because the residual descends from the same hand-off
+-- wherever it is armed again; the stamp of the event that revealed the
+-- hand-off does not, because it is an instant of the trace the hand-off
+-- happened in. Armed again in another trace, the norm is seen where it is
+-- armed, and not at an instant that trace may not have: a norm a @LEST@
+-- armed at 3, revealed at 5, and re-traced from 9 was written effective 9 and
+-- observed 5 ('NormLogSpec' "W2b"). Unchanged when the writer is off, or when
+-- no hand-off armed the norm.
+withoutHandoffStamp :: Environment -> Eval Environment
+withoutHandoffStamp env = asks (.deonticLog) >>= \ case
+  Just l | l.dlWriteFates, Just carrier <- Map.lookup lifecycleOriginUnique env ->
+    decodeOrigin l carrier >>= \ case
+      Just (origin, Just _) -> do
+        carrier' <- newCarrier l origin Nothing
+        pure (Map.insert lifecycleOriginUnique carrier' env)
+      _ -> pure env
+  _ -> pure env
+
+-- | The reference @THE INSTANT@ reads inside a guard: the stamp of the event
+-- being matched, already evaluated. Like the norm log's parent link, it takes
+-- no address from the evaluation's supply, because every printed party key
+-- that holds an unforced field names its address, and a guard that does not
+-- mention @THE INSTANT@ must print what it printed before. The address is the
+-- next of the instant carriers' half of the negative 32-bit range, counted per
+-- evaluation, so nothing that keys on an address can mistake it for another
+-- reference of the same evaluation ('instantCarrierAddress' says why).
+instantCarrier :: WHNF -> Eval Reference
+instantCarrier v = do
+  uri <- asks (.moduleUri)
+  counter <- asks (.instantSupply)
+  k <- liftIO (atomicModifyIORef' counter \ c -> (c + 1, c))
+  address <- maybe (userException (UserError "an evaluation read THE INSTANT in more guards than it can number")) pure
+    (instantCarrierAddress k)
+  pointer <- liftIO (newIORef (WHNF v))
+  pure (MkReference (MkAddress uri address) pointer)
+
+-- | The origin a continuation's environment carries, if the writer is on and
+-- a hand-off bound one ('lifecycleOriginUnique').
+originFromEnv :: DeonticLog -> Environment -> Eval (Maybe NormOrigin)
+originFromEnv l env = fmap fst <$> handoffFromEnv l env
+
+-- | The same with the stamp of the event that revealed the hand-off.
+handoffFromEnv :: DeonticLog -> Environment -> Eval (Maybe (NormOrigin, Maybe Rational))
+handoffFromEnv l env = maybe (pure Nothing) (decodeOrigin l) (Map.lookup lifecycleOriginUnique env)
+
+-- | Read a carrier back. A key made by another evaluation's log (a residual
+-- defined in an imported module is shared between directives, and carries
+-- the key its first evaluation made) is dropped, not looked up: the number
+-- it holds means something else in this log's table (review of P1, W1).
+decodeOrigin :: DeonticLog -> Reference -> Eval (Maybe (NormOrigin, Maybe Rational))
+decodeOrigin l rf = peekWHNF rf >>= \ case
+  Just (ValNumber k)
+    | let (e, n) = truncate k `quotRem` (1099511627776 :: Integer)
+    , e == fromIntegral l.dlEpoch -> liftIO (Map.lookup (fromIntegral n) <$> readIORef l.dlOrigins)
+  _ -> pure Nothing
+
+-- | N7 rule 2: a declared @BREACH@ about to be stamped remembers the
+-- hand-off that reached it, until 'tellBreached' reads it. Set when the
+-- continuation has evaluated to the breach and nothing can run between that
+-- and the stamping, so no other operand's hand-off can intervene.
+setBreachOrigin :: Maybe Reference -> Eval ()
+setBreachOrigin mref = whenDeonticLog \ l -> when l.dlWriteFates do
+  origin <- maybe (pure Nothing) (decodeOrigin l) mref
+  liftIO (writeIORef l.dlBreachOrigin (fst <$> origin))
+
+-- | Write the fate of a declared @BREACH@ each time a continuation reaches
+-- it (N7 rule 1), with the instants SEESAW stamped on it. Peeks and never
+-- forces.
+tellBreached :: ReasonForBreach Reference -> Maybe Rational -> Maybe Rational -> Eval ()
+tellBreached reason effective observed = whenDeonticLog \ l -> when l.dlWriteFates do
+  -- a norm armed before this breach was reached, whose clock the stamping
+  -- has just forced, is written first (review of P1, W4)
+  flushArmed l
+  summary <- breachSummary reason
+  origin <- liftIO (atomicModifyIORef' l.dlBreachOrigin \ o -> (Nothing, o))
+  let named = case drop summary.bsAnchor summary.bsFailures of
+        DeclaredSummary n _ : _ -> n
+        _                       -> NobodyNamed
+  tellFate (breachedEntry origin named effective observed)
 
 -- | Log a step that ROUTES control (a 'Matched' or 'Expired'), filling in
 -- §4.9's join progress from the norm's membership: a barrier member's
@@ -822,6 +1183,17 @@ restamp t reason = breachOf $
     blame = breachBlame reason
     filled = fillDeclaredTiming t blame
     allUntimed = all (isNothing . failureTiming) (blameList blame)
+
+-- | A breach's two instants along its operand tree (SEESAW rule 2): the
+-- effective instant of its anchor, and the earliest observation among its
+-- decisive failures. What a compound's or a barrier's own norm log entry
+-- carries.
+breachInstants :: ReasonForBreach a -> (Maybe Rational, Maybe Rational)
+breachInstants r = let b = breachBlame r in (breachEffective b, breachObserved b)
+
+-- | A fulfilment carries no time (NORM-LOG-SPEC 6.2, N1: not built).
+noInstants :: (Maybe Rational, Maybe Rational)
+noInstants = (Nothing, Nothing)
 
 -- | The action of a forced action reference, if forced.
 peekAction :: Reference -> Eval (Maybe Text)
@@ -919,8 +1291,8 @@ leaveRelookScope = whenDeonticLog \ l -> liftIO (modifyIORef' l.dlRelookScope (d
 -- @App1@ arm below). With the log off this is a lazy record that nothing
 -- forces; with it on, the site's activation counter is bumped and the cast
 -- register consulted for §4.9's per-member identity.
-armNormKey :: MaybeEvaluated -> RAction Resolved -> Eval NormKey
-armNormKey party act = do
+armNormKey :: Environment -> MaybeEvaluated -> RAction Resolved -> Eval NormKey
+armNormKey env party act = do
   mlog <- asks (.deonticLog)
   let site   = rangeOf act
       bearer = either (const Nothing) (Just . partyKeyWHNF) party
@@ -940,9 +1312,46 @@ armNormKey party act = do
       -- name is first learned at Contract8 ('naming')
       nm <- either (const (pure Nothing)) peekName party
       pure (n, m, nm)
+  -- N8: the norm whose hand-off armed this one, when the writer is on
+  origin <- case mlog of
+    Just l | l.dlWriteFates -> originFromEnv l env
+    _                       -> pure Nothing
+  -- N13 (P2): the compounds whose operand this norm is armed inside, and for
+  -- a member of an @EVERY ... ONCE@ barrier, the barrier itself: it is not an
+  -- AND or an OR, so no scope names it, and when it fails it leaves its other
+  -- members armed
+  enclosing <- case mlog of
+    Just l | l.dlWriteFates -> case member of
+      Just m | isBarrier m.moJoin -> (m.moJoinRef :) <$> enclosingNow l
+      _                           -> enclosingNow l
+    _ -> pure []
   pure MkNormKey
     { nkSite = site, nkActivation = activation, nkBearer = bearer, nkBearerName = name
-    , nkBearerSource = source, nkModal = act.modal, nkMember = member }
+    , nkBearerSource = source, nkModal = act.modal, nkMember = member
+    , nkAction = Just (prettyLayout act.action), nkOrigin = origin
+    , nkActionHead = actionHeadOf act.action, nkEnclosing = enclosing }
+
+-- | The constructor an action pattern names: what a read of the norm log
+-- matches the action on (NORM-LOG-SPEC N2, P2). Read from the syntax, not
+-- from the printed action.
+actionHeadOf :: Pattern Resolved -> Maybe Text
+actionHeadOf = \ case
+  PatApp _ n _ -> Just (nameToText (getOriginal n))
+  _            -> Nothing
+
+-- | The compounds the evaluation is inside an operand of, innermost first,
+-- as the norm log names them (NORM-LOG-SPEC N13, P2): the sibling check's own
+-- scope path, whose head is the innermost scope, looked up in the writer's
+-- table of the compounds it has seen start. The table keeps each compound's
+-- own chain, so the answer is one lookup and shares its tail. Reads and
+-- writes nothing else, and forces nothing.
+enclosingNow :: DeonticLog -> Eval [NormRef]
+enclosingNow l = do
+  sref <- asks (.siblings)
+  st <- liftIO (readIORef sref)
+  case st.ssPath of
+    (scope, _) : _ -> maybe [] (uncurry (:)) . Map.lookup scope <$> liftIO (readIORef l.dlCompounds)
+    []             -> pure []
 
 -- | Refresh a key's bearer once the machine has forced the party to WHNF.
 -- Pure and lazy, so the log-off path pays nothing for it.
@@ -969,16 +1378,23 @@ joinSiteOf d = maybe (rangeOf d) rangeOf d.join
 -- | The join's own key, made when the quantified obligation is armed
 -- ('startRollCall'); it is what the barrier's 'JoinReleased' /
 -- 'JoinExpired' / 'JoinFailed' steps carry.
-armJoinKey :: Deonton Resolved -> Eval NormKey
-armJoinKey d = do
+armJoinKey :: Environment -> Deonton Resolved -> Eval NormKey
+armJoinKey env d = do
   mlog <- asks (.deonticLog)
   let site = joinSiteOf d
   activation <- case mlog of
     Nothing -> pure 0
     Just l  -> liftIO (bumpCounter l.dlActivations site)
+  origin <- case mlog of
+    Just l | l.dlWriteFates -> originFromEnv l env
+    _                       -> pure Nothing
+  enclosing <- case mlog of
+    Just l | l.dlWriteFates -> enclosingNow l
+    _                       -> pure []
   pure MkNormKey
     { nkSite = site, nkActivation = activation, nkBearer = Nothing, nkBearerName = Nothing
-    , nkBearerSource = Nothing, nkModal = d.action.modal, nkMember = Nothing }
+    , nkBearerSource = Nothing, nkModal = d.action.modal, nkMember = Nothing
+    , nkAction = Nothing, nkOrigin = origin, nkActionHead = Nothing, nkEnclosing = enclosing }
 
 -- | Register an @EVERY@'s cast, so each member's obligation can find its
 -- membership when it is armed ('armNormKey'). A barrier's arm count starts
@@ -989,7 +1405,7 @@ registerCast ctx kind members = whenDeonticLog \ l -> liftIO do
       jsite = joinSiteOf ctx.deonton
       total = length members
       entries =
-        [ ((site, partyKeyWHNF mval), MkMemberOf {moJoin = kind, moIndex = i, moTotal = total, moJoinSite = jsite})
+        [ ((site, partyKeyWHNF mval), MkMemberOf {moJoin = kind, moIndex = i, moTotal = total, moJoinSite = jsite, moJoinRef = normRefOf ctx.norm})
         | (i, (_, mval)) <- zip [1 ..] members ]
   modifyIORef' l.dlMembers (\ m -> foldl' (\ acc (k, v) -> Map.insert k v acc) m entries)
   modifyIORef' l.dlJoinDone (Map.insert jsite 0)
@@ -1044,7 +1460,7 @@ declareBreach reason = do
     summary <- breachSummary reason
     logStep l MkDeonticStep
       { dsClock = Nothing, dsEvent = Nothing, dsScrutiny = NoEvent, dsNorm = Nothing
-      , dsOutcome = Breached summary, dsJoin = Nothing }
+      , dsOutcome = Breached summary, dsJoin = Nothing, dsEffective = Nothing, dsObserved = Nothing }
   continueBackward (ValBreached reason)
 
 -- | A step with no event and no join progress, for the sites that have
@@ -1052,7 +1468,7 @@ declareBreach reason = do
 plainStep :: Maybe Rational -> Maybe EventKey -> Scrutiny -> NormKey -> StepOutcome -> DeonticStep
 plainStep clock ev scrutiny norm outcome = MkDeonticStep
   { dsClock = clock, dsEvent = ev, dsScrutiny = scrutiny
-  , dsNorm = Just norm, dsOutcome = outcome, dsJoin = Nothing }
+  , dsNorm = Just norm, dsOutcome = outcome, dsJoin = Nothing, dsEffective = Nothing, dsObserved = Nothing }
 
 -- | Throw an evaluation exception: unwind the stack frame by frame (so an
 -- active trace records the pops, mirroring the historical behaviour),
@@ -1063,7 +1479,9 @@ plainStep clock ev scrutiny norm outcome = MkDeonticStep
 -- An allocation limit or a timeout that landed between the pop and
 -- 'unwindFrame' lost the frame: 'runEval' only unwinds the frames still on the
 -- stack, so an 'UpdateThunk' popped but not yet unwound left its thunk
--- blackholed, which for an imported thunk is smucclaw/l4-ide#1020 again.
+-- blackholed, which for an imported thunk was smucclaw/l4-ide#1020 again (a
+-- directive now forces a copy of one, smucclaw/l4-ide#1116, and the same holds
+-- of a heap a host forces directly).
 -- Between frames the mask is off, so a limit landing there finds the next
 -- frame still on the stack, and 'runEval' unwinds it. The mask is only on this
 -- exception path, so evaluation that raises nothing pays nothing.
@@ -1097,11 +1515,18 @@ raiseException e0 = loop e0
 -- resumes. A built-in's 'RuntimeTypeError', which is how one reports an
 -- argument it cannot take (FETCH of a string that is no https URL), is
 -- rewritten the same way; the machine's own invariant failures, the other
--- internal errors, propagate as they are.
+-- internal errors, propagate as they are. So does a budget (smucclaw/l4-ide#1075):
+-- going over one stops the directive whatever it was evaluating, and ruling L2
+-- of the Recursion Limits bench makes the hit an error on that directive that
+-- names the limit, so it is never turned into 'Stuck'. Rewritten, a time or
+-- memory hit under @x AND …@ with @x@ unknown read as "needs x", and did not
+-- stop the run (review of 2026-11-21).
 rewriteUnwinding :: Frame -> EvalException -> EvalException
 rewriteUnwinding f e = case speculativeLeft f of
   Nothing -> e
   Just p  -> case e of
+    UserEvalException (OverBudget _)     -> e
+    UserEvalException (NotEvaluated _ _) -> e
     UserEvalException (Stuck ns) -> stuckException (termNames p <> toList ns)
     UserEvalException _          -> stuckException (termNames p)
     RefusalException _           -> stuckException (termNames p)
@@ -1209,6 +1634,7 @@ unwindFrame = \ case
   ReadCell1 {}                  -> pure ()
   ReadCell2 {}                  -> pure ()
   App1 {}                       -> pure ()
+  App1Operand {}                -> pure ()
   ConnectiveLeft {}             -> pure ()
   ConnectiveRight {}            -> pure ()
   IfThenElse1 {}                -> pure ()
@@ -1312,6 +1738,293 @@ resetUnknownSteps = do
   reachedRef <- asks (.unknownReached)
   liftIO (writeIORef reachedRef [])
 
+-- | smucclaw/l4-ide#1075: an obligation meets its events. Counted, and
+-- stopped with 'OpenObligations' when more are open than the limit allows.
+-- The count is of what the machine does, so the stop falls at the same
+-- place on every machine and under every load.
+noteArming :: RAction Resolved -> Eval ()
+noteArming act = do
+  armedRef <- asks (.armings)
+  armed <- liftIO (readIORef armedRef)
+  let armed' = armed + 1
+  liftIO (writeIORef armedRef armed')
+  asks (.openLimit) >>= traverse_ \ limit -> do
+    closed <- liftIO . readIORef =<< asks (.closes)
+    when (armed' - closed > limit) $ do
+      site <- budgetSite (rangeOf act)
+      userException (OverBudget (OpenObligations limit site))
+
+-- | An armed obligation is handed on to its HENCE or LEST, or breached
+-- with no LEST to go to: it is no longer open.
+noteClose :: Eval ()
+noteClose = do
+  closedRef <- asks (.closes)
+  liftIO (modifyIORef' closedRef (+ 1))
+
+-- | A compound or a barrier is decided, and throws away a residual that was
+-- still waiting: every obligation in it is no longer open.
+noteDropped :: [WHNF] -> Eval ()
+noteDropped residuals = case sum (map heldObligations residuals) of
+  0 -> pure ()
+  n -> do
+    closedRef <- asks (.closes)
+    liftIO (modifyIORef' closedRef (+ n))
+
+-- | The armed obligations a residual still holds: one for each obligation
+-- waiting at the end of its events, through the operands of a compound that
+-- was waiting on both. A breach or a fulfilment holds none.
+heldObligations :: WHNF -> Int
+heldObligations = \ case
+  ValObligation {} -> 1
+  ValROp _ _ l r -> held l + held r
+  _ -> 0
+  where
+    held = either (const 0) heldObligations
+
+-- Note [What the open count counts]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- smucclaw/l4-ide#1075. Every arming ('noteArming', in 'App1') starts one
+-- chain of contract frames for one obligation, and the chain ends in one of:
+-- a hand-off to its HENCE or LEST ('continueWithFollowup'), a breach with no
+-- LEST (the two 'DeadlineMissed' sites), the end of its events (the 'ValNil'
+-- residual in 'Contract1'), or an exception, which ends the directive and
+-- with it the count. The first two close it ('noteClose').
+--
+-- An obligation waiting at the end of its events is NOT closed there: it
+-- stays open for as long as the residual holding it is kept, because that is
+-- what a runaway piles up when the operands do not run in step. An @ROR@
+-- runs its left operand to the end of the events before it starts its right
+-- one ('startCompound'), so @x MEANS (Bob MUST never) ROR (Carol MUST tick
+-- WITHIN 1 LEST (x ROR x))@ doubles its waiting residuals every unit of time
+-- with one or two obligations meeting events at any moment; counted this
+-- way it stops at the limit (measured: 100,000 open, 3 s). Closed at the end
+-- of its events instead, it never counts more than one open, and runs until
+-- memory runs out (measured on a build that did that: a 3 GB heap exhausted
+-- after 77 s, and the run's output lost with it).
+--
+-- So a residual that is thrown away must be closed where it is thrown away
+-- ('noteDropped'). That happens in exactly two places: a compound decided by
+-- one operand while the other was still waiting ('RBinOp2': an @RAND@ one
+-- side of which is breached, an @ROR@ one side of which is fulfilled), and a
+-- barrier that fails or lapses while members are still waiting
+-- ('barrierFinish'). Until they closed it, an @RAND@ breached on one side
+-- under a repeating @LEST@ added one open obligation per round, and a trace
+-- of 100,010 rounds stopped for no reason (measured on the commit before
+-- this one). The state layer's missed @ONCE … WITHIN@ ('barrierStateMissed')
+-- is reached only once every member has completed, so it drops nothing.
+--
+-- Known over-count, which errs towards stopping: a residual that L4 code
+-- applies to more events (EVALTRACE in a fold) is armed again while its first
+-- arming is still counted, because the machine does not know the value it
+-- applies is a residual. No path inside the machine re-applies one.
+
+-- | A function written in L4 is applied to its arguments. Counted, and
+-- stopped with 'ClosureApplications' past the limit: a function that calls
+-- itself with new inputs pushes no frame, so nothing else stops it.
+--
+-- The site is the function's body, or, where the body has no place in the
+-- source, its @GIVEN@, or else the first part of the body that has one: the
+-- body of a definition written as clauses is a generated @CONSIDER@ or @LET@
+-- with no place, and so is its @GIVEN@, but each clause's own body has one.
+-- A closure with none of these, such as a record field's selector, is not
+-- where the hit is reported: past the limit, the count goes on to the next
+-- application that has a place, which is the next function written in L4 to
+-- be applied (not necessarily the one that read the field), and stops at
+-- 'rangelessSlack' past the limit at the latest, so that a run of such
+-- closures still stops: closures with no place can take the count past the
+-- limit by at most the slack.
+noteApplication :: GivenSig Resolved -> Expr Resolved -> Eval ()
+noteApplication givens body = noteWork (rangeOf body <|> rangeOf givens <|> firstPlaceIn body)
+{-# INLINE noteApplication #-}
+
+-- | A contract value meets its events: an obligation is armed, an EVERY
+-- calls its roll, a RAND or ROR starts on its operands, or a FULFILLED or a
+-- breach is handed on. Counted with the applications, in the same total
+-- (L2's numbers, ruled by Meng 2026-11-21: the WORK number is function applications
+-- plus deontic hand-offs). A HENCE that leads back to itself through a
+-- shared value hands off without applying any function, so the
+-- applications alone never see it: @d MEANS e RAND e@ over a shared
+-- FULFILLED doubles the hand-offs at each level with one application in all
+-- (measured: 4,194,303 hand-offs in 3.4 s at 22 levels). The place is the
+-- action, the EVERY, or the compound's operands; a FULFILLED or a breach has
+-- none, and is reported as an application with none is.
+noteHandoff :: Maybe SrcRange -> Eval ()
+noteHandoff = noteWork
+{-# INLINE noteHandoff #-}
+
+-- | Run with the work number for a directive that collects a trace: a trace
+-- holds about 10 KB a step, so it has a lower number by default
+-- ('tracedApplicationLimit'; decided by Claude 2026-11-21, pending Meng's review). Where that number is not the
+-- usual one, the usual one is kept for the stop's message.
+withTracedWorkLimit :: Eval a -> Eval a
+withTracedWorkLimit (MkEval f) = MkEval \ s -> f s
+  { applicationLimit = s.tracedApplicationLimit
+  , usualApplicationLimit = if s.tracedApplicationLimit == s.applicationLimit then Nothing else Just s.applicationLimit
+  }
+
+-- | One step of work, at a place in the source when it has one: counted,
+-- and stopped with 'ClosureApplications' past the limit. The place is read
+-- only past the limit.
+noteWork :: Maybe SrcRange -> Eval ()
+noteWork place = do
+  appliedRef <- asks (.applications)
+  applied <- liftIO (readIORef appliedRef)
+  let applied' = applied + 1
+  liftIO (writeIORef appliedRef applied')
+  asks (.applicationLimit) >>= traverse_ \ limit ->
+    when (applied' > limit) $
+      when (isJust place || applied' > limit + rangelessSlack) $ do
+        site <- budgetSite place
+        usual <- asks (.usualApplicationLimit)
+        userException (OverBudget (ClosureApplications limit site usual))
+{-# INLINE noteWork #-}
+
+-- | Where a RAND or an ROR is in the source, as its operands place it: the
+-- first operand still an expression. One already a value has no place.
+operandsSite :: MaybeEvaluated -> MaybeEvaluated -> Maybe SrcRange
+operandsSite l r = placeOf l <|> placeOf r
+  where
+    placeOf = either rangeOf (const Nothing)
+
+-- | A RAND, an ROR or a barrier joins the breaches of its parts into one
+-- list of failures: stopped with 'JoinedBreaches' when that list would be
+-- longer than the open number (L2's numbers, ruled by Meng 2026-11-21, amending L5:
+-- the list is bounded by L2's open number). A list is a level, not a total,
+-- so a long run of small joins never adds up to a stop; but a breach that is
+-- shared, and joined with itself again and again, doubles its list at each
+-- join with no new work, so nothing else bounds it: @d MEANS c RAND c@ over
+-- a shared BREACH gives 32,768 failures from one built (measured,
+-- 2026-11-21). Each part is counted only as far as the limit, so a join
+-- costs no more than the limit to check.
+noteJoin :: Maybe SrcRange -> [Blame a] -> Eval ()
+noteJoin place blames = asks (.openLimit) >>= traverse_ \ limit ->
+  when (sum (map (length . take (limit + 1) . toList . blameList) blames) > limit) $ do
+    site <- budgetSite place
+    userException (OverBudget (JoinedBreaches limit site))
+
+-- | The first part of an expression, itself included, that has a place in
+-- the source. Read only past the limit, so its walk costs nothing before.
+firstPlaceIn :: Expr Resolved -> Maybe SrcRange
+firstPlaceIn = listToMaybe . mapMaybe rangeOf . Optics.toListOf (Optics.cosmosOf (Optics.gplate @(Expr Resolved)))
+
+-- | How far past the limit on applications the count may go while it looks
+-- for an application with a place in the source ('noteApplication').
+rangelessSlack :: Int
+rangelessSlack = 1_000
+
+-- | A budget's site, with the name of the module's own definition it is in
+-- (ruling L2: the hit names the rule). A site in an imported module, or in
+-- none, keeps only its place in the source.
+budgetSite :: Maybe SrcRange -> Eval BudgetSite
+budgetSite mRange = do
+  rules <- asks (.budgetRules)
+  pure MkBudgetSite
+    { siteRange = mRange
+    , siteRule = mRange >>= \ r -> innermost [ (d, name) | (d, name) <- rules, d `encloses` r ]
+    }
+  where
+    -- the definitions that hold a site nest (overloads split from one run
+    -- of clauses keep the run's range on the first), so the innermost, the
+    -- one that starts last, is the one the site is in
+    innermost = \ case
+      [] -> Nothing
+      ds -> Just (snd (maximumBy (comparing (\ (d, _) -> d.start)) ds))
+    -- 'SrcPos' orders by line, then column
+    encloses :: SrcRange -> SrcRange -> Bool
+    encloses d r = d.moduleUri == r.moduleUri && d.start <= r.start && r.end <= d.end
+
+-- | Every definition of a module, at any depth of its sections, with its
+-- name as the source writes it, without the @\@nlg@ text a head may carry
+-- ('bareName'). Definitions may nest ('budgetSite' takes the innermost).
+moduleRules :: Module Resolved -> [(SrcRange, Text)]
+moduleRules (MkModule _ _ top) = inSection top
+  where
+    inSection (MkSection _ _ _ _ decls) = concatMap inDecl decls
+    inDecl = \ case
+      Decide _ d@(MkDecide _ _ (MkAppForm _ name _ _) _)
+        | Just r <- rangeOf d -> [(r, docText (bareName name))]
+      Section _ sec -> inSection sec
+      _ -> []
+
+-- | Whether an earlier directive stopped the run, and if so on which limit
+-- and where: the directive boundary refuses the next one without starting
+-- it, so that it records no trace ('L4.EvaluateLazy.nfDirectiveWith').
+runStoppedAt :: Eval (Maybe (Budget, Maybe SrcRange))
+runStoppedAt = liftIO . readIORef =<< asks (.runStopped)
+
+-- | A directive went over a limit that stops the run: remember which, and
+-- where, for the directives after it.
+noteRunStopped :: Budget -> Maybe SrcRange -> Eval ()
+noteRunStopped b at = do
+  stoppedRef <- asks (.runStopped)
+  liftIO (writeIORef stoppedRef (Just (b, at)))
+
+-- | Start a directive with nothing armed, closed or applied, and its time
+-- and allocation counted from now.
+resetBudget :: Eval ()
+resetBudget = do
+  for_ [(.armings), (.closes), (.applications)] \ field -> do
+    counter <- asks field
+    liftIO (writeIORef counter 0)
+  clockRef <- asks (.limitClock)
+  liftIO do
+    now <- getMonotonicTime
+    allocation <- getAllocationCounter
+    writeIORef clockRef (MkLimitClock limitCheckInterval now allocation)
+
+-- | The opt-in limits on one directive: wall-clock seconds and megabytes
+-- allocated. Unlike the counted budgets, neither falls at the same place on
+-- every run: the time depends on the machine and its load, and the
+-- allocation on the compiler.
+data DirectiveLimits = MkDirectiveLimits
+  { seconds :: !(Maybe Int)
+  , megabytes :: !(Maybe Int)
+  }
+
+-- | Steps left until the next check, and the monotonic time and the
+-- thread's allocation counter when the directive started.
+data LimitClock = MkLimitClock !Int !Double !Int64
+
+-- | How many machine steps pass between two readings of the clock and the
+-- allocation counter: a step takes about a microsecond, so a few
+-- milliseconds.
+limitCheckInterval :: Int
+limitCheckInterval = 4_096
+
+-- | One machine step under the opt-in limits: every 'limitCheckInterval'
+-- steps, stop the directive if it has run longer or allocated more than
+-- its limit. The stop is an ordinary evaluation exception, so the stack
+-- unwinds as for any other; the directive boundary then stops the run, and
+-- no directive after it is evaluated (ruling L2). The allocation is
+-- read from the counter of the thread that runs the machine, which is the
+-- thread doing the work, whichever thread the caller is on (#1018). A step
+-- that runs one long Haskell computation (a huge power of a number) is not
+-- interrupted until it ends.
+tickLimits :: Eval ()
+tickLimits = asks (.directiveLimits) >>= traverse_ \ lims -> do
+  clockRef <- asks (.limitClock)
+  MkLimitClock left started allocation <- liftIO (readIORef clockRef)
+  if left > 0
+    then liftIO (writeIORef clockRef (MkLimitClock (left - 1) started allocation))
+    else do
+      liftIO (writeIORef clockRef (MkLimitClock limitCheckInterval started allocation))
+      for_ lims.seconds \ limit -> do
+        now <- liftIO getMonotonicTime
+        when (now - started > fromIntegral limit) $
+          userException (OverBudget (TimeLimit limit))
+      for_ lims.megabytes \ limit -> do
+        remaining <- liftIO getAllocationCounter
+        when (allocation - remaining > fromIntegral limit * 1_048_576) $
+          userException (OverBudget (MemoryLimit limit))
+{-# INLINE tickLimits #-}
+
+-- | What this directive has spent so far: obligations armed, obligations
+-- closed, and function applications.
+budgetSpent :: Eval (Int, Int, Int)
+budgetSpent = do
+  let readCounter field = liftIO . readIORef =<< asks field
+  (,,) <$> readCounter (.armings) <*> readCounter (.closes) <*> readCounter (.applications)
+
 -- | The inputs that reached a §4.3 site in this directive.
 reachedUnknowns :: Eval [Term]
 reachedUnknowns = liftIO . readIORef =<< asks (.unknownReached)
@@ -1368,14 +2081,15 @@ refuseWith = raiseException . RefusalException
 pushFrame :: Frame -> Eval ()
 pushFrame frame = do
   stackRef <- asks (.stack)
+  limit <- asks (.maxFrameDepth)
   s <- liftIO (readIORef stackRef)
-  if s.size >= maximumFrameDepth
-    then userException StackOverflow
+  if s.size >= limit
+    then userException (StackOverflow limit)
     else do
       -- Emit the trace `Push` only once the frame is actually pushed. If we
       -- recorded it before the overflow check, a StackOverflow would leave a
       -- dangling Push (M Pushes / M+1 Pops) that later unbalances trace
-      -- post-processing and crashes it (see T7).
+      -- post-processing and crashes it.
       traceEval Push
       liftIO (writeIORef stackRef (MkStack (s.size + 1) (frame : s.frames)))
 
@@ -1438,6 +2152,9 @@ getTracePolicy = asks (.tracePolicy)
 getSafeMode :: Eval Bool
 getSafeMode = asks (.safeMode)
 
+getAnswerInJust :: Eval Bool
+getAnswerInJust = asks (.answerInJust)
+
 getEntityInfo :: Eval EntityInfo
 getEntityInfo = asks (.entityInfo)
 
@@ -1491,10 +2208,13 @@ maximumStalledReoffers = 1_000
 -- | What the machine says when a re-offered event has walked
 -- 'maximumStalledReoffers' continuations in a row without the deadline
 -- advancing: a continuation that names itself (or reaches itself) and is
--- already past its deadline when it is entered — a LEST with a
--- non-positive @WITHIN@ (its clock is the missed deadline), a kept SHANT's
--- HENCE with a negative one (its clock is the revealing stamp), or an
--- anchored deadline no later than the one just missed.
+-- already past its deadline when it is entered — a LEST, or a kept SHANT's
+-- HENCE, with a non-positive @WITHIN@ (each counts from the missed deadline,
+-- floored at the arming: 'clockR', and for the SHANT card A3 of 2026-10-09),
+-- or an anchored deadline no later than the one just missed. Measured
+-- 2026-11-20: @x MEANS PARTY Alice MUST NOT tick WITHIN 0 HENCE x@ on
+-- @WAIT UNTIL 5@ is refused here (deadlines never past 0), as @MUST tick
+-- WITHIN 0 LEST x@ is; with @WITHIN 1@ it runs to a value.
 stalledChainRefusal :: Rational -> Rational -> Text
 stalledChainRefusal highWater stamp = Text.unwords
   [ "A chain of HENCE or LEST continuations has stalled: the event at " <> prettyRatio stamp
@@ -1503,7 +2223,8 @@ stalledChainRefusal highWater stamp = Text.unwords
   , "a deadline it had already revealed the expiry of, so no continuation this"
   , "chain reaches can ever be open to it. A continuation that names itself and"
   , "is already past its deadline when it is entered - a negative WITHIN, a"
-  , "LEST's WITHIN 0, or an anchored deadline no later than the one just"
+  , "WITHIN 0 in a LEST or in the HENCE of a SHANT that was kept, or an"
+  , "anchored deadline no later than the one just"
   , "missed - is such a chain. Give it a positive WITHIN, anchor it later than"
   , "the missed deadline, or end the chain with BREACH."
   , "(EVERY-EACH-QUANTIFIER-SPEC section 5.2.1.)"
@@ -1728,7 +2449,20 @@ startCompound env op rexpr1 rexpr2 rs appType = do
         _                      -> False
       (scope, opened) = openScope (MkScope opText (operandLabel "left" rexpr1) (operandLabel "right" rexpr2) fork inStep) clock outer
       outerPath = outer.ssPath
+      rsite = operandsSite rexpr1 rexpr2
   liftIO (writeIORef sref opened)
+  -- NORM-LOG-SPEC N8 (review of P1, W3c): which application of which compound
+  -- this is, for the entry its join will write. The site is the one the
+  -- machine already keeps for the compound ('rsite', 'operandsSite'): the
+  -- place of its first operand that is still an expression
+  whenDeonticLog \ l -> when l.dlWriteFates do
+    n <- liftIO (bumpCounter l.dlActivations rsite)
+    -- the compounds this one is an operand of: the path as it stood before
+    -- this compound opened its own scope, innermost first
+    enclosing <- case outerPath of
+      (s, _) : _ -> maybe [] (uncurry (:)) . Map.lookup s <$> liftIO (readIORef l.dlCompounds)
+      []         -> pure []
+    liftIO (modifyIORef' l.dlCompounds (Map.insert scope (MkNormRef {nrSite = rsite, nrActivation = n}, enclosing)))
   case (clock, rs) of
     (Nothing, t : _) -> do
       tref <- asks (.siblingStarts)
@@ -1740,7 +2474,7 @@ startCompound env op rexpr1 rexpr2 rs appType = do
       liftIO (modifyIORef' sref (setTaken scope 0))
       dyn0 <- captureDyn
       lockstepNext MkLockstepFrame
-        { lsGate = scope, lsScope = scope, lsOp = op, lsEnv = env, lsTime = time, lsType = appType
+        { lsGate = scope, lsScope = scope, lsOp = op, lsEnv = env, lsSite = rsite, lsTime = time, lsType = appType
         , lsStream = events, lsSlots = [SlotPending rexpr1, SlotPending rexpr2]
         , lsRunning = Nothing, lsRound = [0, 1], lsCell = Nothing, lsTaken = 0, lsHead = Nothing
         , lsBase = dyn0 {dyPath = outerPath, dyClock = outer.ssClock} }
@@ -1749,7 +2483,7 @@ startCompound env op rexpr1 rexpr2 rs appType = do
       pushFrame $ ContractFrame $ RBinOp1 MkRBinOp1 {args = rs, ..}
       -- apply the arguments of the left hand expression to the
       -- expression
-      pushFrame (App1 rs appType)
+      pushFrame (App1Operand rs appType)
       -- R-Q7B: the operand is handed off here, exactly as a HENCE's
       -- value is, so a continuation that arrives as a VALUE inside a
       -- compound anchors to the obligation the compound is attached
@@ -1888,7 +2622,7 @@ lockstepNext ls = case ls.lsRound of
         setDyn start {dyPath = (ls.lsScope, i) : start.dyPath, dyClock = maybe (StartOf ls.lsScope) At clock, dyMuted = start.dyMuted + 1}
         gate <- mintGate ls.lsGate
         pushFrame (Lockstep running)
-        pushFrame (App1 [ls.lsTime, gate] ls.lsType)
+        pushFrame (App1Operand [ls.lsTime, gate] ls.lsType)
         -- R-Q7B: the operand is handed off here, exactly as a HENCE's value
         -- is ('operandHandoff')
         operandHandoff ls.lsEnv rexpr
@@ -1910,7 +2644,7 @@ lockstepNext ls = case ls.lsRound of
         continueRef ls.lsStream
     | [SlotDone v1, SlotDone v2] <- ls.lsSlots -> do
         setDyn ls.lsBase
-        pushFrame (ContractFrame (RBinOp2 MkRBinOp2 {op = ls.lsOp, rval1 = v1, env = ls.lsEnv}))
+        pushFrame (ContractFrame (RBinOp2 MkRBinOp2 {op = ls.lsOp, rval1 = v1, env = ls.lsEnv, scope = ls.lsScope, rsite = ls.lsSite}))
         continueBackward v2
     | otherwise -> internalException $ RuntimeTypeError
         "an in-step compound ended its round with an operand neither waiting nor finished"
@@ -2205,7 +2939,7 @@ forwardExpr env = \ case
     continueExpr env (App emptyAnno l [e]) -- we desugar projection to plain function application
   -- an operand of an in-step compound wants the next event (Note [Operands in step])
   Var _ann n | isGate n -> lockstepPause (getUnique n).unique
-  Var _ann n -> do -- still problematic: similarity / overlap between this and App with no args
+  Var ann n -> do -- still problematic: similarity / overlap between this and App with no args
     -- Auto-apply a discharged import only in VALUE position. The App case above
     -- fetches the function it is about to apply by re-entering here, and
     -- applying it twice would hand the caller the RESULT where it expects a
@@ -2214,9 +2948,26 @@ forwardExpr env = \ case
     -- Money OF ...". An argument is never in this position -- arguments are
     -- allocated, not forwarded -- so an 'App1' carrying arguments on top of the
     -- stack means this reference is the function of that application.
+    --
+    -- An operand of RAND or ROR is evaluated above an application too: the
+    -- compound's own, which gives the operand the time and the events. That one
+    -- is an 'App1Operand', not an 'App1', so it is not this reference's call
+    -- and an imported rule that reads a section GIVEN and returns a contract is
+    -- applied to its own cell here before it is handed them (smucclaw/l4-ide#1118;
+    -- as an 'App1' it stopped with "given signatures' values' lengths do not
+    -- match"). A reference under an IF, a CONSIDER, a WHERE or a LET that is
+    -- itself the operand is reached with that frame still on top, or, inside a
+    -- HENCE or a LEST, with the hand-off frame ('operandHandoff') on top, which
+    -- is not a call either.
     beingApplied <- topFrameAppliesArguments
-    r <- expectTerm env n
-    if beingApplied then continueRef r else autoApplyDischargedImport r
+    -- A bare JSONDECODE in value position, passed as a function, decodes at
+    -- the type its own reference was checked at ('jsonDecodeTargetOfReference').
+    target <- if beingApplied then pure Nothing else jsonDecodeTargetOfReference ann n
+    case target of
+      Just ty -> continueBackward (ValUnaryBuiltinFun (UnaryJsonDecodeAt ty))
+      Nothing -> do
+        r <- expectTerm env n
+        if beingApplied then continueRef r else autoApplyDischargedImport r
   Cons _ann e1 e2 -> do
     rf1 <- allocate_ e1 env
     rf2 <- allocate_ e2 env
@@ -2259,7 +3010,19 @@ forwardExpr env = \ case
         let expectedType = case getAnno ann of
               Anno {extra = Extension {resolvedInfo = Just (TypeInfo ty _)}} -> Just ty
               _ -> Nothing
-        rs <- traverse (`allocate_` env) es
+        rs <- traverse (allocateArgument env) es
+        -- An argument the checker added from a TYPICALLY default
+        -- ('DefaultFill') reports itself when it is first forced, like every
+        -- other default that takes effect ('registerPresumable'). It has a
+        -- cell of its own ('allocateArgument'), so what is registered is this
+        -- default and nothing else.
+        for_ (zip es rs) \ (e, rf) ->
+          for_ (exprDefaultFill e) \ fill ->
+            registerPresumable rf MkPresumed
+              { path       = [rawNameToText fill.binder]
+              , declaredAt = fill.declaredAt
+              , origin     = FromNamedApp (presumedOwner fill.owner)
+              }
         pushFrame (App1 rs expectedType)
         -- Re-enter as a 'Var'. That extra 'ForwardMachine' step is what the
         -- evaluation tracer records as the function being entered, so short-
@@ -2430,7 +3193,7 @@ forwardExpr env = \ case
       Nothing -> userException (UserError (lifecycleValueRefusal p))
 
 backward :: WHNF -> Machine Config
-backward val = withPoppedFrameKeepingUpdate $ \ case
+backward val = withPoppedFrameKeepingUpdate $ \ popped -> case asApp1 <$> popped of
   Nothing -> continueDone val
   Just (BinOp1 binOp e2 env) -> do
     pushFrame (BinOp2 binOp val)
@@ -2514,6 +3277,7 @@ backward val = withPoppedFrameKeepingUpdate $ \ case
   Just f@(App1 rs mTy) -> do
     case val of
       ValClosure givens e env' -> do
+        noteApplication givens e
         env'' <- matchGivens env' givens f rs
         continueExpr (Map.union env'' env') e
       ValUnappliedConstructor r ->
@@ -2525,7 +3289,20 @@ backward val = withPoppedFrameKeepingUpdate $ \ case
             "expected a time stamp, and a list of events but found: " <> foldMap prettyLayout rs'
         -- P2b: this is the ENTRY into the obligation's site — the activation
         -- the step log's key counts. Lazy when the log is off.
-        norm <- armNormKey party act
+        norm <- armNormKey env party act
+        noteHandoff (rangeOf act)
+        noteArming act
+        -- NORM-LOG-SPEC N1/N13: the norm has met its stream and nothing has
+        -- happened to it; the entry an "outstanding" read is made through
+        whenDeonticLog \ l -> when l.dlWriteFates do
+          handoff <- handoffFromEnv l env
+          tellArmed l norm time (handoff >>= snd)
+          -- the wrong writer of 'MutantForce': evaluate a party nothing
+          -- has asked for yet
+          forcing <- asks (.normLogMutant)
+          when (forcing == MutantForce) do
+            hook <- asks (.normLogForce)
+            for_ (either Just (const Nothing) party) (hook env)
         -- smucclaw/l4-ide#1069: the sibling-read check's clock is the arming
         -- time until an event is taken
         noteClock time
@@ -2538,12 +3315,14 @@ backward val = withPoppedFrameKeepingUpdate $ \ case
       ValQuantified env deonton -> do
         -- EVERY meets its event stream: this is the arming point, so the roll
         -- call runs here (spec §2.2.7.5 point 5, R-Q6).
+        noteHandoff (rangeOf deonton)
         (time, events) <- case rs of
           [t, r] -> pure (t, r)
           rs' -> internalException $ RuntimeTypeError $
             "expected a time stamp, and a list of events but found: " <> foldMap prettyLayout rs'
         startRollCall env deonton time events
-      ValROp env op rexpr1 rexpr2 ->
+      ValROp env op rexpr1 rexpr2 -> do
+        noteHandoff (operandsSite rexpr1 rexpr2)
         startCompound env op rexpr1 rexpr2 rs mTy
       ValConnective conn ->
         case (conn, rs) of
@@ -2585,7 +3364,7 @@ backward val = withPoppedFrameKeepingUpdate $ \ case
         -- We need to evaluate arg1, then arg2, then z
         pushFrame (TernaryBuiltin1 fn arg2 z)
         continueRef arg1
-      ValFulfilled -> continueBackward ValFulfilled
+      ValFulfilled -> noteHandoff Nothing >> continueBackward ValFulfilled
       -- SEESAW (spec §6.1.2): a declared breach takes its effective instant
       -- from the clock of the hand-off that reached it — the deadline (no
       -- earlier than the failed obligation's arming) under a LEST, the
@@ -2597,9 +3376,10 @@ backward val = withPoppedFrameKeepingUpdate $ \ case
       -- continuations is one cached thunk, reached at two clocks.
       ValBreached r
         | hasUntimed (breachBlame r), [t, evs] <- rs -> do
+            noteHandoff Nothing
             pushFrame (ContractFrame (StampBreach StampBreachFrame {reason = r, eventsRef = evs}))
             continueRef t
-        | otherwise -> continueBackward (ValBreached r)
+        | otherwise -> noteHandoff Nothing >> continueBackward (ValBreached r)
       -- An assumed function applied is a term (§4.2), keyed by the function
       -- and its arguments' values, read without forcing anything; an
       -- argument that cannot be read so leaves the call Stuck on the
@@ -3014,6 +3794,8 @@ backward val = withPoppedFrameKeepingUpdate $ \ case
     dropTopFrame
     continueBackward val
   Just (ContractFrame cFrame) -> backwardContractFrame val cFrame
+  -- 'asApp1' has turned every 'App1Operand' into the 'App1' it stands for
+  Just App1Operand {} -> internalException $ RuntimeTypeError "an operand's application was not read as an application"
 
 backwardContractFrame :: Value Reference -> ContractFrame -> Machine Config
 backwardContractFrame val = \ case
@@ -3034,7 +3816,9 @@ backwardContractFrame val = \ case
         whenDeonticLog \ l -> do
           clock <- peekClock time
           logStep l (plainStep clock Nothing NoEvent norm Waiting)
-        continueBackward (ValObligation env party act opens due followup lest)
+        -- NORM-LOG-SPEC N3: the residual may be armed again in another trace
+        residualEnv <- withoutHandoffStamp env
+        continueBackward (ValObligation residualEnv party act opens due followup lest)
       _ -> internalException $ RuntimeTypeError $
         "expected LIST EVENT but found: " <> prettyLayout val <> " when scrutinizing regulative events"
   Contract2 ScrutinizeEvent {..} -> case val of
@@ -3207,9 +3991,10 @@ backwardContractFrame val = \ case
       -- performance, and the verdict at an instant depended on how many
       -- events the trace carried). The only chain that does not end is
       -- one that reaches ITSELF without the deadline advancing — a
-      -- self-naming LEST with a non-positive WITHIN, or anchored at an
-      -- instant no later than the deadline just missed — whose every
-      -- incarnation is already past when it is entered. That is an
+      -- self-naming LEST, or a kept SHANT's self-naming HENCE (whose clock
+      -- is the window's end since card A3), with a non-positive WITHIN, or
+      -- anchored at an instant no later than the deadline just missed —
+      -- whose every incarnation is already past when it is entered. That is an
       -- ill-founded contract, and the machine refuses it by name rather
       -- than walking it forever: the copy carries a 'Reoffered' mark
       -- ('markReoffered', read back at Contract1 as 'ev'reoffered') with
@@ -3278,12 +4063,15 @@ backwardContractFrame val = \ case
                 mParty <- peekWHNF ev'party
                 ev <- eventKeyAt stamp mParty ev'act
                 norm' <- maybe (pure norm) (`naming` norm) mBearer
-                pure $ Just $ plainStep (Just time') (Just ev)
-                  (scrutinyOf ev'reoffered ev'relooked WitnessedOnly) norm' (Expired branch deadline)
+                pure $ Just $
+                  (plainStep (Just time') (Just ev)
+                    (scrutinyOf ev'reoffered ev'relooked WitnessedOnly) norm' (Expired branch deadline))
+                    {dsEffective = Just effective}
         let lifecycleAt isHence = MkLifecycle
               { join = if isHence then Just clockR else Nothing
               , deadline = Just deadlineR
-              , armed }
+              , armed
+              , origin = Nothing } -- set at 'ResolveParty', once the party is keyed
             reofferResolve isHence followup' branch = do
               pending <- expiredStep branch Nothing
               -- The mark the copy carries on: a fresh event starts the walk
@@ -3334,6 +4122,7 @@ backwardContractFrame val = \ case
                   mBearer <- peekWHNF partyR
                   expiredStep ToBreach mBearer >>= traverse_ tellDeonticStep
                 let timing = Timing {effective, observed = stamp, revealedBy = Just (ev'party, ev'act)}
+                noteClose
                 continueBackward (ValBreached (DeadlineMissed ev'party ev'act stamp (singleBlame (MissedDeadline partyR act deadline timing))))
               Just lestFollowup -> reofferResolve False lestFollowup ToLest
       else do
@@ -3384,7 +4173,13 @@ backwardContractFrame val = \ case
         -- event's stamp
         noteClockWHNF time
         pushCFrame $ Contract10 ScrutinizeActions {..}
-        continueExpr (env `Map.union` henceEnv) (fromMaybe trueExpr act.provided)
+        -- N4 (P2): THE INSTANT in the guard is the stamp of this event
+        guardEnv <- case act.provided of
+          Nothing -> pure (env `Map.union` henceEnv)
+          Just _  -> do
+            instantRef <- instantCarrier time
+            pure (Map.insert lifecycleInstantUnique instantRef (env `Map.union` henceEnv))
+        continueExpr guardEnv (fromMaybe trueExpr act.provided)
       _ -> internalException $ RuntimeTypeError $
         "expected environment but found: " <> prettyLayout val
   Contract10 ScrutinizeActions {..} ->
@@ -3449,7 +4244,9 @@ backwardContractFrame val = \ case
               -- or MAY's there is none, and the checker refuses THE JOIN
               -- there); THE DEADLINE is the window's end, which is NOT the
               -- clock here
-              let lifecycle = MkLifecycle {join = Just timeR, deadline = deadlineR, armed}
+              let seenAt = case time of { ValNumber t -> Just t; _ -> Nothing }
+              origin <- handoffOrigin norm ViaLest seenAt
+              let lifecycle = MkLifecycle {join = Just timeR, deadline = deadlineR, armed, origin}
               continueWithFollowup (Just (partyKeyWHNF party)) lifecycle (env `Map.union` henceEnv) lestFollowup events timeR seen
             -- No LEST clause: immediate breach
             Nothing -> do
@@ -3470,6 +4267,7 @@ backwardContractFrame val = \ case
               -- not contradict the spec.
               -- SEESAW: a violation takes effect when it happens, and is seen then
               let timing = Timing {effective = stamp, observed = stamp, revealedBy = Just (ev'partyRef, ev'act)}
+              noteClose
               continueBackward (ValBreached (DeadlineMissed ev'partyRef ev'act stamp (singleBlame (MissedDeadline partyRef act stamp timing))))
           -- MUST, MAY, DO: action done = success
           _ -> do
@@ -3479,7 +4277,9 @@ backwardContractFrame val = \ case
             -- HENCE: the join is this completion (R-Q7, §5.1: an unanchored
             -- continuation counts from here, so OF THE JOIN is the default
             -- said out loud)
-            let lifecycle = MkLifecycle {join = Just timeR, deadline = deadlineR, armed}
+            let seenAt = case time of { ValNumber t -> Just t; _ -> Nothing }
+            origin <- handoffOrigin norm ViaHence seenAt
+            let lifecycle = MkLifecycle {join = Just timeR, deadline = deadlineR, armed, origin}
             continueWithFollowup (Just (partyKeyWHNF party)) lifecycle (env `Map.union` henceEnv) followup events timeR seen
       ValBool False -> do
         -- P2b: the action matched but the PROVIDED did not hold; next event.
@@ -3500,16 +4300,32 @@ backwardContractFrame val = \ case
       for_ (expiredBranch step.dsOutcome) \ branch -> do
         named <- naming val norm
         tellRoutedStep named branch step
+    -- N8: the continuation's parent link names the norm as the party's
+    -- forcing has just refreshed it (the expiry path builds the lifecycle
+    -- before the party is known)
+    lifecycle' <- case pending >>= \ step -> (,) <$> step.dsNorm <*> expiredBranch step.dsOutcome of
+      Just (norm, branch) -> do
+        named <- naming val norm
+        -- the event that revealed the miss is where the hand-off was seen
+        origin <- handoffOrigin named (case branch of { ToHence -> ViaHence; _ -> ViaLest })
+                    (pending >>= \ step -> (.ekStamp) <$> step.dsEvent)
+        pure (withOrigin lifecycle origin)
+      Nothing -> pure lifecycle
     -- 'val' is the obligation party, now forced to WHNF by 'maybeEvaluate env party'
     -- on the deadline-passed / LEST path. Key it exactly as the matched HENCE path
     -- does, so a RECORD in the followup/reparation attributes to the real party.
     -- 'time' is the continuation's clock as 'Contract5' chose it: the
     -- missed deadline under LEST, the revealing event's stamp under HENCE.
-    continueWithFollowup (Just (partyKeyWHNF val)) lifecycle env followup events time seen
+    continueWithFollowup (Just (partyKeyWHNF val)) lifecycle' env followup events time seen
   -- R-Q7B: the continuation's value, about to meet its [time, events]: make
   -- the anchors inside it name THIS hand-off's obligation, whatever
   -- environment the value happened to capture ('rebindLifecycle').
-  Handoff lifecycle ->
+  Handoff lifecycle -> do
+    -- N7 rule 2: a declared BREACH about to meet its time and events
+    -- remembers the hand-off that reached it
+    case val of
+      ValBreached _ -> setBreachOrigin lifecycle.origin
+      _             -> pure ()
     continueBackward (rebindLifecycle lifecycle val)
   -- SEESAW: the hand-off clock a declared breach takes ('StampBreach'). It
   -- is observed at that clock too, unless the stream it was handed starts
@@ -3522,8 +4338,11 @@ backwardContractFrame val = \ case
       let timing = case revealed of
             Just (p, a, stamp) -> Timing {effective = clock, observed = max clock stamp, revealedBy = Just (p, a)}
             Nothing            -> Timing {effective = clock, observed = clock, revealedBy = Nothing}
+      tellBreached reason (Just timing.effective) (Just timing.observed)
       continueBackward (ValBreached (restamp timing reason))
-    _ -> continueBackward (ValBreached reason)
+    _ -> do
+      tellBreached reason Nothing Nothing
+      continueBackward (ValBreached reason)
   -- EVERY, the roll call. One cons cell of the roll per step. A roll, or the
   -- rest of one, that is not known is Stuck on it: nobody can say who the
   -- group is.
@@ -3758,7 +4577,7 @@ backwardContractFrame val = \ case
       -- P2b: the OR's commonest success path. The RBinOp2 arm for a
       -- fulfilled LEFT operand is unreachable because of this short-circuit,
       -- so the step is logged here.
-      joinedStep op JoinFulfilled (Just LeftSide) False
+      joinedStep scope env op JoinFulfilled noInstants (Just LeftSide) False
       -- smucclaw/l4-ide#1069: the right alternative is never run, so a
       -- record it would have made is never compared with a read; written the
       -- other way round it would have run first. Hand the check what it can
@@ -3784,7 +4603,7 @@ backwardContractFrame val = \ case
     -- second argument has completed
     pushCFrame $ RBinOp2 MkRBinOp2 {rval1 = val, ..}
     -- pass the arguments to the regulative expression
-    pushFrame $ App1 args Nothing
+    pushFrame $ App1Operand args Nothing
     -- R-Q7B: the right operand is handed off like the left one was
     operandHandoff env rexpr2
     maybeEvaluate env rexpr2
@@ -3816,13 +4635,14 @@ backwardContractFrame val = \ case
       -- first, with duplicates: @PARTY alice MUST x RAND PARTY alice MUST y@
       -- both missed names alice twice, once per way. A breach with no BY is
       -- one entry naming nobody.
+      noteJoin rsite [breachBlame r1, breachBlame r2]
       let (decider, blame) = combineBlame op (breachBlame r1) (breachBlame r2)
           chosen = breachOf blame
       -- P2b: which operand decides the compound's instant (both, on a tie).
       -- The summary names every failure of both sides.
       whenDeonticLog \ _ -> do
         summary <- breachSummary chosen
-        joinedStep op (JoinBreached summary) (Just (case decider of
+        joinedStep scope env op (JoinBreached summary) (breachInstants chosen) (Just (case decider of
           LeftDecides  -> LeftSide
           RightDecides -> RightSide
           BothDecide   -> BothSides)) False
@@ -3832,7 +4652,7 @@ backwardContractFrame val = \ case
     | ValFulfilled <- val
     , ValFulfilled <- rval1
     -> do
-      joinedStep op JoinFulfilled (Just BothSides) False
+      joinedStep scope env op JoinFulfilled noInstants (Just BothSides) False
       continueBackward ValFulfilled
 
   -- NOTE: note that blame assignment in the case of AND
@@ -3851,7 +4671,8 @@ backwardContractFrame val = \ case
     -> do
       whenDeonticLog \ _ -> do
         summary <- breachSummary reason
-        joinedStep op (JoinBreached summary) (Just LeftSide) False
+        joinedStep scope env op (JoinBreached summary) (breachInstants reason) (Just LeftSide) False
+      noteDropped [val] -- Note [What the open count counts]
       continueBackward (ValBreached reason)
   RBinOp2 MkRBinOp2 {..}
     | ValRAnd <- op
@@ -3859,7 +4680,8 @@ backwardContractFrame val = \ case
     -> do
       whenDeonticLog \ _ -> do
         summary <- breachSummary reason
-        joinedStep op (JoinBreached summary) (Just RightSide) False
+        joinedStep scope env op (JoinBreached summary) (breachInstants reason) (Just RightSide) False
+      noteDropped [rval1] -- Note [What the open count counts]
       continueBackward (ValBreached reason)
 
   -- OR
@@ -3867,7 +4689,8 @@ backwardContractFrame val = \ case
     | ValROr <- op
     , ValFulfilled <- val
     -> do
-      joinedStep op JoinFulfilled (Just RightSide) False
+      joinedStep scope env op JoinFulfilled noInstants (Just RightSide) False
+      noteDropped [rval1] -- Note [What the open count counts]
       continueBackward ValFulfilled
   -- NOTE: unreachable — a fulfilled LEFT operand of an OR never gets past
   -- the RBinOp1 short-circuit above, which is where that step is logged.
@@ -3876,7 +4699,8 @@ backwardContractFrame val = \ case
     | ValROr <- op
     , ValFulfilled <- rval1
     -> do
-      joinedStep op JoinFulfilled (Just LeftSide) False
+      joinedStep scope env op JoinFulfilled noInstants (Just LeftSide) False
+      noteDropped [val] -- Note [What the open count counts]
       continueBackward ValFulfilled
 
 
@@ -3884,7 +4708,7 @@ backwardContractFrame val = \ case
   -- any reduction of the contract clauses and thus have to return
   -- a value that represents the operator applied to each operand
   RBinOp2 MkRBinOp2 {..} -> do
-    joinedStep op JoinPending Nothing False
+    joinedStep scope env op JoinPending noInstants Nothing False
     continueBackward (ValROp env op (Right rval1) (Right val))
   where
     tryNextEvent :: ScrutinizeEvents -> Reference -> Machine Config
@@ -3978,11 +4802,25 @@ backwardContractFrame val = \ case
 
     -- P2b: an 'RBinOp2' reduction, logged as a 'Joined' step. The compound
     -- is not a norm instance, so the step carries no key (see 'dsNorm').
-    joinedStep :: RBinOp -> JoinResult -> Maybe Side -> Bool -> Eval ()
-    joinedStep op result winner tieBreak = tellDeonticStep MkDeonticStep
-      { dsClock = Nothing, dsEvent = Nothing, dsScrutiny = NoEvent, dsNorm = Nothing
-      , dsOutcome = Joined op MkJoinNote {jnResult = result, jnWinner = winner, jnTieBreak = tieBreak}
-      , dsJoin = Nothing }
+    --
+    -- The note carries what the norm log's entry for the compound needs
+    -- (review of P1, W3): which application of which compound this is, the
+    -- hand-off that armed it, and, for a breach, SEESAW's two instants.
+    joinedStep :: Int -> Environment -> RBinOp -> JoinResult -> (Maybe Rational, Maybe Rational) -> Maybe Side -> Bool -> Eval ()
+    joinedStep scope env op result (effective, observed) winner tieBreak = whenDeonticLog \ l -> do
+      (entry, origin) <- if l.dlWriteFates
+        then (,) <$> liftIO (Map.lookup scope <$> readIORef l.dlCompounds) <*> originFromEnv l env
+        else pure (Nothing, Nothing)
+      let site = fst <$> entry
+          enclosing = maybe [] snd entry
+      logStep l MkDeonticStep
+        { dsClock = Nothing, dsEvent = Nothing, dsScrutiny = NoEvent, dsNorm = Nothing
+        , dsOutcome = Joined op MkJoinNote
+            { jnResult = result, jnRef = site, jnOrigin = origin, jnEnclosing = enclosing
+            , jnEffective = if l.dlWriteFates then effective else Nothing
+            , jnObserved = if l.dlWriteFates then observed else Nothing
+            , jnWinner = winner, jnTieBreak = tieBreak }
+        , dsJoin = Nothing, dsEffective = Nothing, dsObserved = Nothing }
 
     -- M4 party-threading hinge: set the acting party for the DURATION of the
     -- HENCE/LEST body, so a RECORD fired inside it routes to that party's own
@@ -4032,6 +4870,9 @@ backwardContractFrame val = \ case
     -- See 'sentinelArgs'.
     continueWithFollowup :: Maybe Text -> Lifecycle -> Environment -> RExpr -> Reference -> Reference -> Int -> Machine Config
     continueWithFollowup mParty lifecycle env followup events time seen = do
+      -- smucclaw/l4-ide#1075: every hand-off closes the obligation that
+      -- makes it; whatever the continuation arms is counted when it arms
+      noteClose
       mOriginal <- getCurrentParty
       putCurrentParty mParty
       -- smucclaw/l4-ide#1069: a RECORD or RECALL in the continuation is made
@@ -4188,7 +5029,7 @@ startRollCall env deonton time events =
       "a PARTY obligation reached the quantifier's roll call"
     Every _ cast var roll mFilt -> do
       -- P2b: arming is the join's own entry into its site.
-      norm <- armJoinKey deonton
+      norm <- armJoinKey env deonton
       -- WHO and WHOSE are one filter to the machine: the checker has already
       -- rewritten a WHOSE operand's first word into @v's field@ (§13.6), so
       -- what runs here is a Boolean expression either way.
@@ -4533,7 +5374,7 @@ barrierNext step = case step.queue of
 -- join cannot fire and the verdict is @FULFILLED@, as before.
 barrierFinish :: BarrierStepFrame -> Machine Config
 barrierFinish step = case reverse step.failures of
-  (f : fs) -> case earliestFailure (f :| fs) of
+  (f : fs) -> noteDropped step.pending >> case earliestFailure (f :| fs) of
     -- the LEST is handed the anchor, the residual stream AND the missed
     -- deadline of the member whose failure anchors it (R-Q7B's THE
     -- DEADLINE under a barrier's LEST is the earliest failer's, by the
@@ -4549,6 +5390,13 @@ barrierFinish step = case reverse step.failures of
        Nothing -> internalException $ RuntimeTypeError
          "a barrier with no LEST recorded a failure that is not a breach"
        Just blames -> do
+        -- A guard: no test reaches it. Each failed member gives one
+        -- failure, its own missed deadline, and every member is armed when
+        -- the barrier is, so a join longer than the open number was
+        -- already stopped by 'OpenObligations' at arming (measured
+        -- 2026-11-21: twelve members answer under an open number of 12,
+        -- naming twelve failures, and stop as obligations under 11).
+        noteJoin (rangeOf step.ctx.deonton) (toList blames)
         let verdict = breachOf (combineAll blames)
         -- P2b: the barrier's own step, logged once the verdict is decided
         -- (every member has run). The clock is the anchoring failure's
@@ -4557,13 +5405,18 @@ barrierFinish step = case reverse step.failures of
         let clock = case verdict of
               DeadlineMissed _ _ stamp _ -> Just stamp
               ExplicitBreach {}          -> Nothing
-        tellDeonticStep $ plainStep clock Nothing NoEvent step.ctx.norm (JoinFailed ToBreach)
+        -- the barrier is lost along its members' operand tree, as a RAND
+        -- (SEESAW rule 2); its entry takes the verdict's two instants
+        let (lostAt, seenAt) = breachInstants verdict
+        tellDeonticStep $ (plainStep clock Nothing NoEvent step.ctx.norm (JoinFailed ToBreach))
+          {dsEffective = lostAt, dsObserved = seenAt}
         continueBackward (ValBreached verdict)
   []
     | step.lapsed -> do
         -- P2b: a MAY member lapsed under a barrier with no LEST; the join
         -- can never fire. 'ValFulfilled' carries no time, so no clock.
         tellDeonticStep $ plainStep Nothing Nothing NoEvent step.ctx.norm JoinStalled
+        noteDropped step.pending -- Note [What the open count counts]
         continueBackward ValFulfilled
     | otherwise -> case reverse step.pending of
       -- Some members are still waiting for their event. The barrier has neither
@@ -4668,7 +5521,9 @@ fireBarrierHence ctx deadlineRef timeRef eventsRef = do
   noteClock timeRef -- smucclaw/l4-ide#1069: the join's clock
   pushFrame (RestoreCurrentParty mOriginal False)
   pushFrame (App1 [timeRef, eventsRef] Nothing)
-  let lifecycle = MkLifecycle {join = Just timeRef, deadline = deadlineRef, armed = ctx.time}
+  releasedAt <- peekClock timeRef
+  origin <- handoffOriginJoin ctx.norm ViaHence releasedAt
+  let lifecycle = MkLifecycle {join = Just timeRef, deadline = deadlineRef, armed = ctx.time, origin}
   pushFrame (ContractFrame (Handoff lifecycle))
   continueExpr (bindLifecycle lifecycle ctx.env) (fromMaybe fulfilExpr ctx.deonton.hence)
 
@@ -4705,15 +5560,20 @@ barrierFail ctx deadlineRef timeRef eventsRef = case ctx.deonton.lest of
     "the barrier's LEST sentinel fired for a barrier that has no LEST"
   Just lestExpr -> do
     -- P2b: the failing member's own expiry step precedes this one.
+    -- the instants are the failing member's: it failed at 'timeRef' and the
+    -- event that revealed it is the head of the residual stream it left
+    -- (review of P1, W3e). Peeked, as everything the writer reads is
+    revealedAt <- fmap (\ (_, _, stamp) -> stamp) <$> revealingEvent eventsRef
     whenDeonticLog \ l -> do
       clock <- peekClock timeRef
-      logStep l (plainStep clock Nothing NoEvent ctx.norm (JoinFailed ToLest))
+      logStep l (plainStep clock Nothing NoEvent ctx.norm (JoinFailed ToLest)) {dsEffective = clock, dsObserved = revealedAt}
     mOriginal <- getCurrentParty
     putCurrentParty Nothing
     noteClock timeRef -- smucclaw/l4-ide#1069: the failure's clock
     pushFrame (RestoreCurrentParty mOriginal False)
     pushFrame (App1 [timeRef, eventsRef] Nothing)
-    let lifecycle = MkLifecycle {join = Nothing, deadline = deadlineRef, armed = ctx.time}
+    origin <- handoffOriginJoin ctx.norm ViaLest revealedAt
+    let lifecycle = MkLifecycle {join = Nothing, deadline = deadlineRef, armed = ctx.time, origin}
     pushFrame (ContractFrame (Handoff lifecycle))
     continueExpr (bindLifecycle lifecycle ctx.env) lestExpr
 
@@ -4774,7 +5634,11 @@ barrierStateLest ctx lestExpr tRef cellRef = do
   scoped <- enterRelookScope (joinSiteOf ctx.deonton)
   pushFrame (RestoreCurrentParty mOriginal scoped)
   pushFrame (App1 [tRef, cellRef] Nothing)
-  let lifecycle = MkLifecycle {join = Nothing, deadline = Just tRef, armed = ctx.time}
+  -- the stamp the state-layer LEST is seen at is not in hand here (the last
+  -- completion is two frames back): 'Nothing', so its norms are seen at the
+  -- state deadline (NORM-LOG-SPEC 6.2, N8: not built)
+  origin <- handoffOriginJoin ctx.norm ViaLest Nothing
+  let lifecycle = MkLifecycle {join = Nothing, deadline = Just tRef, armed = ctx.time, origin}
   pushFrame (ContractFrame (Handoff lifecycle))
   continueExpr (bindLifecycle lifecycle ctx.env) lestExpr
 
@@ -4805,10 +5669,19 @@ barrierStateLest ctx lestExpr tRef cellRef = do
 
 -- | The three uniques. Sort @l@ is used nowhere else (@b@ builtins, @c@
 -- checker, @d@ discharge, @e@ evaluator, @s@ the barrier's sentinels).
-lifecycleJoinUnique, lifecycleDeadlineUnique, lifecycleArmingUnique :: Unique
+lifecycleJoinUnique, lifecycleDeadlineUnique, lifecycleArmingUnique, lifecycleOriginUnique, lifecycleInstantUnique :: Unique
 lifecycleJoinUnique     = MkUnique 'l' 1 lifecycleUri
 lifecycleDeadlineUnique = MkUnique 'l' 2 lifecycleUri
 lifecycleArmingUnique   = MkUnique 'l' 3 lifecycleUri
+-- | NORM-LOG-SPEC N8: the norm log writer's parent link, bound beside the
+-- anchors so that it travels exactly as they do ('bindLifecycle',
+-- 'rebindLifecycle', 'operandHandoff'). Not an anchor: no program can read it.
+lifecycleOriginUnique   = MkUnique 'l' 4 lifecycleUri
+-- | NORM-LOG-SPEC N4 (P2): @THE INSTANT@, bound for the evaluation of a
+-- @PROVIDED@ guard only ('instantCarrier'), to the stamp of the event the
+-- guard is matched against. Not a hand-off position: 'bindLifecycle' neither
+-- sets nor deletes it, because a guard is not an obligation's continuation.
+lifecycleInstantUnique  = MkUnique 'l' 5 lifecycleUri
 
 lifecycleUri :: NormalizedUri
 lifecycleUri = toNormalizedUri (Uri "jl4:lifecycle")
@@ -4822,6 +5695,7 @@ lifecycleUri = toNormalizedUri (Uri "jl4:lifecycle")
 bindLifecycle :: Lifecycle -> Environment -> Environment
 bindLifecycle lc =
   Map.insert lifecycleArmingUnique lc.armed
+  . maybe (Map.delete lifecycleOriginUnique) (Map.insert lifecycleOriginUnique) lc.origin
   . maybe (Map.delete lifecycleDeadlineUnique) (Map.insert lifecycleDeadlineUnique) lc.deadline
   . maybe (Map.delete lifecycleJoinUnique) (Map.insert lifecycleJoinUnique) lc.join
 
@@ -4859,6 +5733,7 @@ lifecycleOf env = do
     { join     = Map.lookup lifecycleJoinUnique env
     , deadline = Map.lookup lifecycleDeadlineUnique env
     , armed
+    , origin   = Map.lookup lifecycleOriginUnique env
     }
 
 -- | Hand an operand of a compound off before it is evaluated and applied:
@@ -4883,6 +5758,7 @@ lifecyclePointUnique = \ case
   LifecycleJoin     -> lifecycleJoinUnique
   LifecycleDeadline -> lifecycleDeadlineUnique
   LifecycleArming   -> lifecycleArmingUnique
+  LifecycleInstant  -> lifecycleInstantUnique
 
 -- | An obligation's environment as it is armed: THE ARMING bound to the
 -- arming instant ONLY where no hand-off bound one (§2.6 card B1, "THE
@@ -5156,7 +6032,8 @@ finishRead mode cellVal key site ledger = do
 -- | Is the top of the stack an application waiting for its function?
 --
 -- 'App1' with a NON-empty argument list. The empty one is what
--- 'autoApplyDischargedImport' itself pushes, and must not count.
+-- 'autoApplyDischargedImport' itself pushes, and must not count. Neither does
+-- an 'App1Operand', which a compound pushes above its operand's application.
 topFrameAppliesArguments :: Machine Bool
 topFrameAppliesArguments = do
   stackRef <- asks (.stack)
@@ -5164,6 +6041,47 @@ topFrameAppliesArguments = do
   pure case st.frames of
     App1 (_ : _) _ : _ -> True
     _                  -> False
+
+-- | An 'App1Operand' as the 'App1' it stands for; every other frame as it is.
+asApp1 :: Frame -> Frame
+asApp1 = \ case
+  App1Operand rs mTy -> App1 rs mTy
+  f                  -> f
+
+-- | The type a bare @JSONDECODE@ reference decodes into, when it is passed as
+-- a function (@map JSONDECODE xs@) rather than applied where it is written
+-- (smucclaw/l4-ide#1078).
+--
+-- A decode is otherwise typed by the node that applies it (the 'App' case,
+-- 'UnaryJsonDecode'), and for a function passed on, that node is wherever it
+-- is finally applied: inside the prelude's @map@ it is @f x@, whose type says
+-- nothing about this call. The reference's own annotation does, once the type
+-- checker has resolved it ('L4.TypeCheck.zonkDecodeTargets').
+--
+-- Only a target the decoder can find is used: every type it names must be a
+-- type in the evaluator's entity table, the same table the decoder looks a
+-- record or an enumeration up in. A type parameter (@GIVEN a IS A TYPE@)
+-- never is, and a reference checked at one is common: the body of
+-- @GIVEN a IS A TYPE GIVETH A FUNCTION FROM STRING TO EITHER STRING a@ is
+-- stamped with that type. Using it would replace the type of the node that
+-- applies the function, which can be concrete, with @a@, and stop a decode
+-- that works. So anything else, an inference variable included, gives
+-- 'Nothing', and the reference stays the shared builtin, as before.
+jsonDecodeTargetOfReference :: Anno -> Resolved -> Machine (Maybe (Type' Resolved))
+jsonDecodeTargetOfReference ann n
+  | getUnique n == TypeCheck.jsonDecodeUnique
+  , Anno {extra = Extension {resolvedInfo = Just (TypeInfo ty _)}} <- ann
+  , Fun _ [_] (TyApp _ eitherRef [_, target]) <- ty
+  , getUnique eitherRef == TypeCheck.eitherUnique = do
+      entityInfo <- getEntityInfo
+      let declared r = case Map.lookup (getUnique r) entityInfo of
+            Just (_, TypeCheck.KnownType {}) -> True
+            _ -> False
+          decodable = \ case
+            TyApp _ r ts -> declared r && all decodable ts
+            _ -> False
+      pure (if decodable target then Just target else Nothing)
+  | otherwise = pure Nothing
 
 autoApplyDischargedImport :: Reference -> Machine Config
 autoApplyDischargedImport r = do
@@ -5548,34 +6466,7 @@ extractFieldNamesAndTypes ty = case ty of
 cannotDecode :: DecodeAt -> Text -> Aeson.Value -> Text -> Machine a
 cannotDecode at typeName jsonValue why =
   userException $ UserError $
-    "Could not decode " <> TE.decodeUtf8 (BS.toStrict (Aeson.encode jsonValue))
-      <> " as " <> typeName <> atField at <> ": " <> why
-
--- | What a value of a choice type is given as in JSON, for 'cannotDecode':
--- the constructors without fields, by name, and those with fields, which
--- cannot be given at all.
-choiceExpectation :: Text -> [Text] -> [Text] -> Text
-choiceExpectation typeName withoutFields withFields = case (withoutFields, withFields) of
-  ([], [])  -> typeName <> " has no constructor that JSON input can name."
-  ([], _)   -> "every constructor of " <> typeName <> " has fields (" <> commas withFields
-                 <> "), and a constructor with fields cannot be given as JSON input."
-  (_, [])   -> "expected a string naming one of: " <> commas withoutFields <> "."
-  (_, _)    -> "expected a string naming one of: " <> commas withoutFields
-                 <> ". A constructor with fields (" <> commas withFields
-                 <> ") cannot be given as JSON input."
-  where commas = Text.intercalate ", "
-
--- | Why a JSON string is not a value of a choice type, for 'cannotDecode'.
-choiceNameMiss :: Text -> Text -> [Text] -> [Text] -> Text
-choiceNameMiss typeName name withoutFields withFields
-  | name `elem` withFields =
-      name <> " has fields, and a constructor with fields cannot be given as JSON input"
-        <> if null withoutFields
-             then "."
-             else "; expected a string naming one of: " <> Text.intercalate ", " withoutFields <> "."
-  | otherwise =
-      "it names no constructor of " <> typeName <> "; "
-        <> choiceExpectation typeName withoutFields withFields
+    couldNotDecodeText (TE.decodeUtf8 (BS.toStrict (Aeson.encode jsonValue))) typeName (atField at) why
 
 -- | Is this a constructor of the given type, with or without fields?
 constructorReturning :: Type' Resolved -> Resolved -> Bool
@@ -5607,6 +6498,15 @@ encodeValueToJson = \case
     | otherwise -> pure $ Text.pack $ show (fromRational n :: Double)
   ValBool True -> pure "true"
   ValBool False -> pure "false"
+  -- A DATE and a TIME are written as strings in the text form the language
+  -- prints them in (@2026-01-31@, @10:30:00@), and a DATETIME as RFC 3339 in
+  -- UTC, whatever its own zone (@2026-01-31T10:30:00Z@), the one text every
+  -- writer of a DATETIME uses (W1, option B: smucclaw/l4-ide#1083).
+  -- 'parseDateText', 'parseTimeText' and 'parseDatetimeText' read each back at
+  -- the same type.
+  ValDate day -> pure $ quoted (formatDateIso day)
+  ValTime tod -> pure $ quoted (formatTimeOfDayExact tod)
+  ValDateTime utc _tz -> pure $ quoted (formatUTCTimeIsoExact utc)
   ValNil -> pure "[]"
   ValCons _x _xs ->
     -- This should not be reached as lists are handled in runBuiltin with frames
@@ -5627,6 +6527,9 @@ encodeValueToJson = \case
   v | Just ns <- unknownNames v -> stuckOn ns
   val -> internalException $ RuntimeTypeError $ "Cannot encode value to JSON: " <> prettyLayout val
   where
+    quoted :: Text -> Text
+    quoted t = "\"" <> escapeJson t <> "\""
+
     escapeJson :: Text -> Text
     escapeJson = Text.concatMap \case
       '"' -> "\\\""
@@ -5671,10 +6574,16 @@ data DecodeAt = MkDecodeAt
 decodeRoot :: Type' Resolved -> Machine DecodeAt
 decodeRoot ty = do
   rr <- asks (.requestRecord)
+  owners <- asks (.recordOwners)
   let isRequest = case (rr, ty) of
         (Just r, TyApp _ tyRef []) -> nameToText (TypeCheck.getName tyRef) == r
         _                          -> False
-  pure (MkDecodeAt (prettyLayout ty) [] isRequest)
+      -- a record declared under a heading is named behind it, as a WITH default
+      -- is, whichever way the decode site spelled the type
+      root = case ty of
+        TyApp _ tyRef [] | Just owner <- Map.lookup (getUnique tyRef) owners -> owner
+        _                                                                    -> prettyLayout ty
+  pure (MkDecodeAt root [] isRequest)
 
 -- | @ for field 'a.b'@, or nothing at the root of the decode.
 atField :: DecodeAt -> Text
@@ -5695,8 +6604,8 @@ renderPresumedPath = Text.concat . go True
 
 -- | The value of a @TYPICALLY@ default, which is a literal ('L4.TypeCheck.isTypicallyLiteral'):
 -- a number, a string, or a nullary constructor. 'Nothing' for anything else,
--- which the checker does not admit today; R8 rule 3 (expression defaults, W7)
--- will need an environment here.
+-- which the checker does not admit: HAIRCUT (2026-10-12) ruled that a default
+-- is a literal, so expression defaults (R8 rule 3, W7) are withdrawn.
 typicallyLiteralValue :: Expr Resolved -> Maybe WHNF
 typicallyLiteralValue = \ case
   Lit _ (NumericLit _ r) -> Just (ValNumber r)
@@ -5787,8 +6696,7 @@ jsonValueToWHNFTyped at jsonValue ty0 = do
                   mTzName <- readTcDocumentTimezone
                   let tzName = fromMaybe "Etc/UTC" mTzName
                   pure $ ValDateTime utc tzName
-                Nothing -> userException $ UserError $
-                  "Could not parse datetime string '" <> s <> "'. Expected ISO-8601 format: YYYY-MM-DDTHH:MM:SSZ"
+                Nothing -> userException $ UserError $ datetimeRefusal s
             _ -> userException $ UserError $
                   "Expected JSON string for DATETIME" <> atField at <> " but got: " <> Text.pack (show jsonValue)
 
@@ -5978,7 +6886,7 @@ suppliedField = \ case
 -- string for a @Year@ is accepted as it stands instead of refused as it is for
 -- a @NUMBER@.
 expandTypeSynonyms :: Type' Resolved -> Machine (Type' Resolved)
-expandTypeSynonyms = go (16 :: Int)
+expandTypeSynonyms = go synonymExpansionFuel
   where
     go 0 ty = pure ty
     go n ty@(TyApp _ tyRef args) = do
@@ -5989,18 +6897,6 @@ expandTypeSynonyms = go (16 :: Int)
               go (n - 1) (substituteTypeParams (Map.fromList (zip (map getUnique params) args)) body)
         _ -> pure ty
     go _ ty = pure ty
-
-substituteTypeParams :: Map Unique (Type' Resolved) -> Type' Resolved -> Type' Resolved
-substituteTypeParams sub = \ case
-  TyApp ann r []
-    | Just t <- Map.lookup (getUnique r) sub -> t
-    | otherwise -> TyApp ann r []
-  TyApp ann r ts -> TyApp ann r (map (substituteTypeParams sub) ts)
-  Fun ann args res ->
-    Fun ann [ MkOptionallyNamedType a n (substituteTypeParams sub t) | MkOptionallyNamedType a n t <- args ]
-      (substituteTypeParams sub res)
-  Forall ann vs t -> Forall ann vs (substituteTypeParams sub t)
-  other -> other
 
 -- | Check if a type is MAYBE α (used for optional record field handling)
 isMaybeFieldTy :: Type' Resolved -> Bool
@@ -6022,7 +6918,7 @@ jsonListToWHNFTyped at = go (0 :: Int)
         SuppliedNull spelling
           | isMaybeFieldTy elementType -> pure (ValConstructor TypeCheck.nothingRef [])
           | otherwise -> userException $ UserError $
-              "Field '" <> renderPresumedPath elementAt.fieldPath <> "' " <> nullRefusalText spelling False
+              "Field '" <> renderPresumedPath elementAt.fieldPath <> "' " <> nullRefusalText spelling NoDefaultToTake
         _ -> jsonValueToWHNFTyped elementAt x elementType
       headRef <- allocateValue headVal
       tailVal <- go (i + 1) xs elementType
@@ -6235,7 +7131,16 @@ runBuiltin es op mTy = do
               TypeCheck.KnownTerm conType Constructor -> do
                 -- Extract field names from the constructor's function type
                 fieldNames <- extractFieldNames conType
-                if length fieldNames /= length fields
+                case (fieldNames, fields) of
+                 ([], [field]) -> do
+                  -- One argument without a name, as in LEFT x and RIGHT x:
+                  -- an object keyed by the constructor, {"LEFT": x}, so the
+                  -- two sides of an EITHER stay apart.
+                  pushFrame (JsonEncodeConstructorFrame [] (nameToText (TypeCheck.getName conRef)) [])
+                  pushFrame (UnaryBuiltin0 UnaryJsonEncode Nothing)
+                  continueRef field
+                 _ ->
+                  if length fieldNames /= length fields
                   then internalException $ RuntimeTypeError $
                     "Field count mismatch for constructor " <> nameToText (TypeCheck.getName conRef) <>
                     ": expected " <> Text.pack (show (length fieldNames)) <>
@@ -6277,6 +7182,12 @@ runBuiltin es op mTy = do
           decodeJsonToValueTyped jsonStr innerTy
         Nothing ->
           decodeJsonToValue jsonStr
+      continueBackward result
+    -- The type came with the function value ('jsonDecodeTargetOfReference');
+    -- the node applying it, here, may know less.
+    UnaryJsonDecodeAt target -> do
+      jsonStr <- expectString es
+      result <- decodeJsonToValueTyped jsonStr target
       continueBackward result
 #ifdef HTTP_ENABLED
     UnaryFetch -> do
@@ -6452,31 +7363,47 @@ runBuiltin es op mTy = do
       val :: Rational <- expectNumber es
       let valDouble :: Double
           valDouble = fromRational val
+          -- The functions computed on a double. An answer that is not finite
+          -- would reach 'toRational' as a meaningless 309-digit number, so it
+          -- raises, naming the input when the input is what did not fit. A
+          -- finite answer is returned, even for an input past the range: ATAN
+          -- of 10^400 is pi/2 to the last digit.
+          viaDouble :: Text -> (Double -> Double) -> Machine Config
+          viaDouble name f
+            | isNaN r || isInfinite r =
+                userException $ UserError (name <> " cannot compute this: " <> why)
+            | otherwise = continueBackward $ ValNumber (toRational r)
+            where
+              r = f valDouble
+              why
+                | isInfinite valDouble = "the number is past the range of numbers it handles (about 1.8E308 either side of 0)"
+                | valDouble == 0 && val /= 0 = "the number is too close to 0 for the numbers it handles (about 4.9E-324)"
+                | otherwise = "the result is too large (it handles results up to about 1.8E308)"
       case op of
         UnaryLn ->
           if val <= 0
             then userException $ UserError "LN expects input greater than 0"
-            else continueBackward $ ValNumber (toRational (log valDouble))
+            else viaDouble "LN" log
         UnaryLog10 ->
           if val <= 0
             then userException $ UserError "LOG10 expects input greater than 0"
-            else continueBackward $ ValNumber (toRational (logBase 10 valDouble))
+            else viaDouble "LOG10" (logBase 10)
         UnarySin ->
-          continueBackward $ ValNumber (toRational (sin valDouble))
+          viaDouble "SIN" sin
         UnaryCos ->
-          continueBackward $ ValNumber (toRational (cos valDouble))
+          viaDouble "COS" cos
         UnaryTan ->
-          continueBackward $ ValNumber (toRational (tan valDouble))
+          viaDouble "TAN" tan
         UnaryAsin ->
           if val < (-1) || val > 1
             then userException $ UserError "ASIN expects input between -1 and 1"
-            else continueBackward $ ValNumber (toRational (asin valDouble))
+            else viaDouble "ASIN" asin
         UnaryAcos ->
           if val < (-1) || val > 1
             then userException $ UserError "ACOS expects input between -1 and 1"
-            else continueBackward $ ValNumber (toRational (acos valDouble))
+            else viaDouble "ACOS" acos
         UnaryAtan ->
-          continueBackward $ ValNumber (toRational (atan valDouble))
+          viaDouble "ATAN" atan
         UnaryIsInteger -> continueBackward $ valBool $ isJust $ isInteger val
         UnaryRound -> continueBackward $ valInt $ round val
         UnaryCeiling -> continueBackward $ valInt $ ceiling val
@@ -6485,7 +7412,7 @@ runBuiltin es op mTy = do
         UnarySqrt ->
           if val < 0
             then userException $ UserError "SQRT expects input greater than or equal to 0"
-            else continueBackward $ ValNumber (toRational (sqrt valDouble))
+            else viaDouble "SQRT" sqrt
   where
     valInt :: Integer -> WHNF
     valInt = ValNumber . toRational
@@ -6559,11 +7486,32 @@ runBinOp BinOpModulo    (ValNumber num1) (ValNumber num2)      = do
   if n2 /= 0
     then continueBackward $ ValNumber (toRational $ n1 `mod` n2)
     else userException (DivisionByZero BinOpModulo)
-runBinOp BinOpExponent  (ValNumber base) (ValNumber exp_)   =
-  let result = (fromRational base :: Double) ** (fromRational exp_ :: Double)
-  in if isNaN result || isInfinite result
-       then userException $ UserError "TO THE POWER OF produced a non-finite result (overflow, 0 to a negative power, or a negative base raised to a fractional power)"
-       else continueBackward $ ValNumber (toRational result)
+runBinOp BinOpExponent  (ValNumber base) (ValNumber exp_)
+  -- Checked on the exact values: as doubles, a huge negative base is -Infinity,
+  -- and a power that is nearly whole rounds to whole, and then no NaN says so.
+  | base == 0 && exp_ < 0 =
+      userException $ UserError "EXPONENT of 0 to a negative power has no result"
+  | base < 0 && denominator exp_ /= 1 =
+      userException $ UserError "EXPONENT does not compute a negative number to a fractional power"
+  | otherwise =
+      let base' = fromRational base :: Double
+          exp' = fromRational exp_ :: Double
+          result = base' ** exp'
+      -- Only an answer that is not finite raises; a finite one is returned,
+      -- even for an input past the range: 10^400 to the power 0 is 1.
+      in if isNaN result || isInfinite result
+           then userException $ UserError (exponentNotFinite base' exp')
+           else continueBackward $ ValNumber (toRational result)
+  where
+    -- A result that is not finite is not always too large: an input that is
+    -- past the range of a double is already infinite, or 0, before the power is
+    -- taken, and then the true result may well fit. Only when every input fits
+    -- is the result said to be too large.
+    exponentNotFinite base' exp'
+      | isInfinite base' = "EXPONENT cannot compute this: the base is past the range of numbers it handles (about 1.8E308 either side of 0)"
+      | base' == 0 && base /= 0 = "EXPONENT cannot compute this: the base is too close to 0 for the numbers it handles (about 4.9E-324)"
+      | isInfinite exp' = "EXPONENT cannot compute this: the power is past the range of numbers it handles (about 1.8E308 either side of 0)"
+      | otherwise = "EXPONENT overflowed: the result is too large (it handles results up to about 1.8E308)"
 runBinOp BinOpTrunc (ValNumber value) (ValNumber digits) =
   let digitsInt = round digits :: Integer
       scale k = (10 :: Rational) ^^ k
@@ -7445,21 +8393,53 @@ preAllocate ns = do
   pairs <- traverse preAllocateRef ns
   pure (Map.fromList pairs)
 
+-- | Allocate the cell of one argument of an application.
+--
+-- A default the checker added ('DefaultFill') always gets a cell of its own,
+-- even when it is a bare constructor (@TRUE@, @NOTHING@, an enum value).
+-- 'allocate_' would hand such an argument the one cell every use of that
+-- constructor shares, and 'registerPresumable' would then mark that shared
+-- cell: every later force of @FALSE@ anywhere in the run would report the
+-- default, whether or not the rule read it, and two defaults that are the same
+-- constructor would take the one registry slot between them. A numeric or
+-- string default was never affected, because a literal always gets a cell.
+allocateArgument :: Environment -> Expr Resolved -> Machine Reference
+allocateArgument env e
+  | isJust (exprDefaultFill e) = fst <$> allocateRecursive e (const env)
+  | otherwise                  = allocate_ e env
+
 allocate_ :: Expr Resolved -> Environment -> Machine Reference
-allocate_ (Var _ann n) env = do
-  -- special case where we do not actually need to allocate
-  --
-  -- NOT extended to auto-apply a discharged import (see
-  -- 'dischargedImportClosure'). Allocating the application here instead of
-  -- sharing the cell fixes an operand-position reference across an IMPORT, but
-  -- it also fires on every RECORD CONSTRUCTOR: a @DECLARE@'s field names are
-  -- module-level selectors, so a constructor's parameters are keys in its own
-  -- captured environment exactly as a discharged reader's are, and the guard
-  -- cannot tell them apart. Measured 2026-09-05 on the sweep corpus:
-  -- @legal\/promissory-note.l4@ and @legal\/regcf\/regcf.l4@ both went red with
-  -- \"expected a function but found: Money OF ...\". See the operand-position
-  -- limitation recorded in IMPLICIT-PROPS-DESIGN.md.
-  expectTerm env n
+allocate_ (Var ann n) env = do
+  -- An argument that is a bare JSONDECODE, as in @map JSONDECODE xs@, gets
+  -- its own cell, which knows the type to decode at; sharing the builtin's
+  -- cell would lose it ('jsonDecodeTargetOfReference', smucclaw/l4-ide#1078).
+  target <- jsonDecodeTargetOfReference ann n
+  case target of
+    Just ty -> allocateValue (ValUnaryBuiltinFun (UnaryJsonDecodeAt ty))
+    Nothing ->
+      -- special case where we do not actually need to allocate: the name's
+      -- own cell is the reference
+      do
+        r <- expectTerm env n
+        -- With one exception: a discharged import ('dischargedImportClosure').
+        -- Sharing its cell hands the consumer the CLOSURE where it asked for a
+        -- value, and 'forwardExpr', the only other place that applies one, is
+        -- not where every consumer looks. A built-in forces its operands with
+        -- 'continueRef' (@doubled PLUS 1@ was an internal error and
+        -- @doubled EQUALS 30@ compared a function); a list element or a record
+        -- field simply held the function; a rule's argument and a projection's
+        -- scrutinee passed it on to those (smucclaw/l4-ide#1115). So such a
+        -- reference gets a thunk of its own, @App n []@, which 'forwardExpr'
+        -- applies when it is forced, as it does for a bare @#EVAL doubled@.
+        --
+        -- The guard is the one 'autoApplyDischargedImport' and 'matchGivens''
+        -- use. A rule with inputs of its own, and a record constructor, each
+        -- passed on as a value, still fail it and stay functions
+        -- (ok/section-given-import-operand-call.l4).
+        discharged <- dischargedImportClosure r
+        if discharged
+          then fst <$> allocateRecursive (App ann n []) (const env)
+          else pure r
 allocate_ expr env =
   fst <$> allocateRecursive expr (const env)
 
@@ -7608,13 +8588,15 @@ evalDirective env (AssertRefused ann expr mmsg) = do
   -- is decided statically here rather than evaluated.
   --
   -- 'Nothing' here means "the directive imposes no constraint on the reason",
-  -- so the wildcard MUST be unreachable for a payload the author wrote: a
-  -- payload we cannot read would otherwise become an assertion that holds for
-  -- every refusal reason. Two upstream checks make it so -- 'Parser.directive'
-  -- accepts only a 'lit' after BECAUSE, and 'TypeCheck.inferDirective' requires
-  -- that literal to be a STRING -- which leaves the wildcard reachable only for
-  -- a module that never type-checked. If you widen either of those, decide what
-  -- an unreadable payload means before you land it.
+  -- so it MUST be unreachable for a reason the author wrote: a reason we
+  -- cannot read, or one that never reaches the directive, would otherwise
+  -- become an assertion that holds for every refusal reason. Three upstream
+  -- checks make it so -- 'Parser.directive' accepts only a 'lit' after
+  -- BECAUSE, 'Parser.assertRefusedSubject' rejects a BECAUSE that a BREACH in
+  -- the expression would take as its own, and 'TypeCheck.inferDirective'
+  -- requires the literal to be a STRING -- which leaves the wildcard reachable
+  -- only for a module that never type-checked. If you widen any of those,
+  -- decide what an unreadable reason means before you land it.
   let wanted = case mmsg of
         Just (Lit _ (StringLit _ t)) -> Just t
         _                            -> Nothing
@@ -8602,30 +9584,64 @@ parseTimeText raw =
        , Just tod <- [TimeFormat.parseTimeM True TimeFormat.defaultTimeLocale fmt (Text.unpack trimmed)]
        ]
 
--- | Parse an ISO-8601 datetime string to UTCTime
+-- | Parse an ISO-8601 datetime string to UTCTime. The time ends in @Z@, in a
+-- numeric offset (@+0800@ or @+08:00@), or in the word @UTC@ or @GMT@, which
+-- stand for the offset 0. No other zone name is read: @CST@ is US Central to
+-- one reader and China Standard Time to another, so the text does not fix an
+-- instant. 'datetimeRefusal' says so when a text is refused.
 parseDatetimeText :: Text -> Maybe UTCTime
 parseDatetimeText raw =
-  let trimmed = Text.strip raw
-      formats =
-        [ "%Y-%m-%dT%H:%M:%S%Z"
-        , "%Y-%m-%dT%H:%M:%S%Q%Z"
-        , "%Y-%m-%dT%H:%M:%SZ"
-        , "%Y-%m-%dT%H:%M:%S%QZ"
-        , "%Y-%m-%dT%H:%M:%S%z"
-        , "%Y-%m-%dT%H:%M:%S%Q%z"
-        , "%Y-%m-%d %H:%M:%S%Z"
-        , "%Y-%m-%d %H:%M:%S%z"
-        ]
-  in listToMaybe
-       [ utc
-       | fmt <- formats
-       , Just utc <- [TimeFormat.parseTimeM True TimeFormat.defaultTimeLocale fmt (Text.unpack trimmed)]
-       ]
+  listToMaybe
+    [ utc
+    | fmt <- formats
+    , Just utc <- [TimeFormat.parseTimeM True TimeFormat.defaultTimeLocale fmt (Text.unpack zoned)]
+    ]
+  where
+    trimmed = Text.strip raw
+    -- the word touches the time, as it did when the zone was read by name
+    zoned = case [ body
+                 | word <- ["UTC", "GMT"]
+                 , Just body <- [Text.stripSuffix word trimmed]
+                 , not (Text.null body)
+                 , not (Char.isSpace (Text.last body))
+                 ] of
+      body : _ -> body <> "Z"
+      []       -> trimmed
+    formats =
+      [ "%Y-%m-%dT%H:%M:%SZ"
+      , "%Y-%m-%dT%H:%M:%S%QZ"
+      , "%Y-%m-%dT%H:%M:%S%z"
+      , "%Y-%m-%dT%H:%M:%S%Q%z"
+      , "%Y-%m-%d %H:%M:%SZ"
+      , "%Y-%m-%d %H:%M:%S%z"
+      ]
+
+-- | What is said of a text that 'parseDatetimeText' refused. It names the fix:
+-- the time is followed by Z or by an offset such as @+08:00@. A text that
+-- would be read if its time zone abbreviation were a Z says that it is the
+-- abbreviation that is not read.
+datetimeRefusal :: Text -> Text
+datetimeRefusal s
+  | Text.length letters >= 2, isJust (parseDatetimeText (body <> "Z")) =
+      "Could not parse datetime string '" <> s <> "': the time zone abbreviation '" <> letters
+        <> "' is not read, because an abbreviation does not fix one offset. Write Z or an offset such as +08:00 after the time."
+  | otherwise =
+      "Could not parse datetime string '" <> s <> "'. Expected ISO-8601 format: YYYY-MM-DDTHH:MM:SS followed by Z or an offset such as +08:00"
+  where
+    letters = Text.takeWhileEnd Char.isAlpha (Text.strip s)
+    body = Text.stripEnd (Text.dropWhileEnd Char.isAlpha (Text.strip s))
 
 -- | Format a TimeOfDay as HH:MM:SS
 formatTimeOfDay :: TimeOfDay -> Text
 formatTimeOfDay tod =
   Text.pack $ TimeFormat.formatTime TimeFormat.defaultTimeLocale "%H:%M:%S" tod
+
+-- | 'formatTimeOfDay', with the fraction of a second after the seconds when
+-- there is one (@10:30:00.5@), so that 'parseTimeText' reads back the same
+-- time. A whole number of seconds is written as before.
+formatTimeOfDayExact :: TimeOfDay -> Text
+formatTimeOfDayExact tod =
+  Text.pack $ TimeFormat.formatTime TimeFormat.defaultTimeLocale "%H:%M:%S%Q" tod
 
 -- | Format a 'UTCTime' as a plain ISO-8601 UTC string (e.g.
 -- @2026-06-12T08:30:00Z@). Used for ledger provenance positions (M2), where we
@@ -8636,16 +9652,29 @@ formatUTCTimeIso utc =
 
 -- | Format a UTCTime with timezone offset as ISO-8601
 formatDateTimeIso :: UTCTime -> Text -> Text
-formatDateTimeIso utc tzName =
+formatDateTimeIso = formatDateTimeIsoWith "%S"
+
+-- | An instant as RFC 3339 in UTC (@2026-01-31T10:30:00Z@), with the fraction
+-- of a second after the seconds when there is one (@2026-01-31T10:30:00.5Z@),
+-- so that 'parseDatetimeText' reads back the same instant. 'iso8601Show' keeps
+-- four digits for a year before 1000 (@0099-01-31T10:30:00Z@), which
+-- @formatTime@'s @%Y@ does not.
+formatUTCTimeIsoExact :: UTCTime -> Text
+formatUTCTimeIsoExact = Text.pack . iso8601Show
+
+-- | The datetime in the given timezone as @YYYY-MM-DDTHH:MM:SS@ followed by its
+-- UTC offset, the seconds written with the given format.
+formatDateTimeIsoWith :: String -> UTCTime -> Text -> Text
+formatDateTimeIsoWith secondsFmt utc tzName =
   case tryLoadTZPure tzName of
     Just tz ->
       let localTime' = TZ.utcToLocalTimeTZ tz utc
           offset = TZ.timeZoneForUTCTime tz utc
           offsetStr = TimeFormat.formatTime TimeFormat.defaultTimeLocale "%z" offset
-      in Text.pack (TimeFormat.formatTime TimeFormat.defaultTimeLocale "%Y-%m-%dT%H:%M:%S" localTime') <> Text.pack offsetStr
+      in Text.pack (TimeFormat.formatTime TimeFormat.defaultTimeLocale ("%Y-%m-%dT%H:%M:" <> secondsFmt) localTime') <> Text.pack offsetStr
     Nothing ->
       -- Fallback: format as UTC
-      Text.pack $ TimeFormat.formatTime TimeFormat.defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" utc
+      Text.pack $ TimeFormat.formatTime TimeFormat.defaultTimeLocale ("%Y-%m-%dT%H:%M:" <> secondsFmt <> "Z") utc
 
 -- | Pure-ish wrapper for TZ loading (uses unsafePerformIO since TZ data is static)
 tryLoadTZPure :: Text -> Maybe TZ.TZ

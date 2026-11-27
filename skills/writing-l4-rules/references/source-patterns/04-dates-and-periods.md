@@ -304,7 +304,7 @@ The options are:
   `__LEQ__` (predefined) of type FUNCTION FROM NUMBER AND NUMBER TO BOOLEAN
   `__LEQ__` (predefined) of type FUNCTION FROM STRING AND STRING TO BOOLEAN
   `__LEQ__` (predefined) of type FUNCTION FROM BOOLEAN AND BOOLEAN TO BOOLEAN
-  `__LEQ__` (defined at prelude.l4:785:1-10) of type FUNCTION FROM MAYBE OF NUMBER AND MAYBE OF NUMBER TO BOOLEAN
+  `__LEQ__` (defined at prelude.l4:796:1-10) of type FUNCTION FROM MAYBE OF NUMBER AND MAYBE OF NUMBER TO BOOLEAN
   `__LEQ__` (defined at daydate.l4:704:1-10) of type FUNCTION FROM DATE AND DATE TO BOOLEAN
 ```
 
@@ -708,10 +708,14 @@ and `YMD`, the bounds-checked constructor, refuses it outright:
 
 ```text
 DATE OF 1, 1, 2025
-`YMD refused an out-of-range month or day`
+The model refuses to answer:
+  YMD refused an out-of-range month or day
 ```
 
-_(Probe `q15c-months-back.l4`, exit 0. January 2025, not September 2024.)_ Go backwards by adding to
+_(Probe `q15c-months-back.l4`, exit 0. January 2025, not September 2024.)_
+The refusal text above is the `dev` build's, measured 2026-11-28.
+`main` builds 109 and 112 refuse too, with `YMD: the month is not a whole number from 1 to 12` for this case, and build 98 has no `YMD`.
+Go backwards by adding to
 the **earlier** date and comparing, or by decrementing the year, which can never produce a month of
 zero.
 

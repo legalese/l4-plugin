@@ -1,0 +1,1827 @@
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+module L4.Lexer where
+
+import Base
+import Data.Ord (Down(..))
+import qualified Base.Map as Map
+import qualified Base.Set as Set
+import qualified Base.Text as Text
+
+import qualified Data.List.NonEmpty as NonEmpty
+import Data.Monoid (Alt (..))
+import qualified Data.Scientific as Sci
+import Data.Char hiding (Space)
+import GHC.Show (showLitString)
+import Text.Megaparsec as Megaparsec
+import Text.Megaparsec.Char
+import Text.Megaparsec.State ( initialPosState )
+import qualified Text.Megaparsec.Char.Lexer as Lexer
+import L4.Parser.SrcSpan
+import qualified L4.SmartPunctuation as SP
+
+type Lexer = Parsec Void Text
+
+-- | Megaparsec stores offsets as integers.
+type Offset = Int
+
+-- | A raw token is a token with offset information attached by Megaparsec.
+data RawToken =
+  MkRawToken
+    { start   :: !Offset
+    , payload :: !TokenType
+    , end     :: !Offset
+    }
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (ToExpr, NFData)
+
+-- | A pos token is a token with position information attached.
+data PosToken =
+  MkPosToken
+    { range   :: !SrcRange
+    , payload :: !TokenType
+    }
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (ToExpr, NFData)
+
+data AnnoType
+  = InlineAnno
+  | LineAnno
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (ToExpr, NFData)
+
+-- | A language subtag on an @\@nlg@ annotation: the @he@ in @\@nlg:he@.
+--
+-- Carried on the HERALDED form only. The bare inline @[…]@ form has no free
+-- position for one — 'toAnno's inline branch is @oh <> t <> ch@ with nothing
+-- between the opening bracket and the text — which is why that form stays
+-- untaggable (ruled 2026-09-17; @[\@he …]@ is pre-approved for later).
+--
+-- Not validated as BCP 47 here. The lexer's job is to capture it; rejecting
+-- @\@nlg:klingon@ belongs later, where a diagnostic can carry a source span.
+newtype LangTag = MkLangTag Text
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (ToExpr, NFData)
+
+-- | The language part of a tag, before its first hyphen: the @he@ of @he-IL@.
+langPrimary :: LangTag -> Text
+langPrimary (MkLangTag t) = Text.takeWhile (/= '-') t
+
+-- | How closely a wording's language answers a request for another, or
+-- 'Nothing' when it does not answer it at all. Lower is closer:
+--
+-- * 0, the same tag;
+-- * 1, the wording's tag is a prefix of the request: @he@ answers @he-IL@;
+-- * 2, the two share their language: @he-IL@ answers @he@, and @he-IL@
+--   answers @he-XX@.
+--
+-- Every reader that asks "is this wording in that language" goes through
+-- this, so a wording tagged @he-IL@ is picked by @--lang he@, and the Hebrew
+-- frame words reach it, without each reader deciding that again. The tags are
+-- compared as written, as everywhere else: @HE@ is not @he@.
+langMatchRank :: LangTag -> LangTag -> Maybe Int
+langMatchRank want@(MkLangTag w) have@(MkLangTag h)
+  | want == have                        = Just 0
+  | (h <> "-") `Text.isPrefixOf` w      = Just 1
+  | langPrimary want == langPrimary have = Just 2
+  | otherwise                           = Nothing
+
+data TDirectives
+  = TLazyEvalDirective
+  | TLazyEvalTraceDirective
+  | TCheckDirective
+  | TContractDirective
+  | TAssertDirective
+  | TDirectiveContinue  -- ^ '# ' at start of line continues a directive
+  deriving stock (Eq, Generic, Ord, Show)
+  deriving anyclass (ToExpr, NFData)
+
+directives :: Map Text TDirectives
+directives = Map.fromList
+  [ ("EVALTRACE", TLazyEvalTraceDirective)
+  , ("EVAL"     , TLazyEvalDirective)
+  , ("CHECK"    , TCheckDirective)
+  , ("TRACE"    , TContractDirective)
+  , ("ASSERT"   , TAssertDirective)
+  ]
+
+data TAnnotations
+  = TNlg          !(Maybe LangTag) !Text !AnnoType
+  | TRefSrc       !Text
+  | TRefMap       !Text
+  | TRef          !Text !AnnoType
+  | TNlgString    !Text
+  | TNlgPrefix    !(Maybe LangTag) -- ^ "@nlg", optionally ":he"
+  | TDesc         !Text -- ^ "@desc"
+  | TExport       !Text -- ^ "@export"
+  | TFixity       !FixityDirection !Text -- ^ "@infixl" / "@infixr" / "@infix"
+  | TNonexhaustive      !Text -- ^ "@nonexhaustive"
+  | TNonassertable
+    -- ^ @\@nonassertable@: the definition below may not be asserted by a
+    -- request (PRESUMPTION-ASSERTION contract §6). Its own token, so that a
+    -- @\@desc@ whose text happens to start with the word cannot stand in for it.
+  | TEndsBecause  !Text
+    -- ^ @\@ends-because <reason>@: the author vouches that the recursion in the
+    -- definition below ends, and says why. The 'Text' is the RAW rest of the
+    -- line, spacing included, which 'displayTokenType' re-emits for exactprint.
+    -- Its own token, never folded into @\@desc@ the way @\@nonexhaustive@ is
+    -- ('L4.Parser.descP'), so that a @\@desc ends-because …@ cannot stand in for it.
+  | TLang         !LangTag !Text
+    -- ^ @\@lang he@ — the module's default language, the one an untagged
+    -- @\@nlg@ in that module is written in. The 'Text' is the RAW remainder
+    -- after the herald, spacing and any trailing comment included, because
+    -- 'displayTokenType' re-emits it for exactprint; the 'LangTag' is the
+    -- parsed subtag, so no reader has to re-split the line.
+  deriving stock (Eq, Generic, Ord, Show)
+  deriving anyclass (ToExpr, NFData)
+
+-- | Associativity direction of a fixity annotation ('@infixl' / '@infixr' /
+-- '@infix'). Declared here (rather than in the parser or syntax tree) because
+-- the lexer token carries it.
+data FixityDirection
+  = FixityLeft   -- ^ "@infixl"
+  | FixityRight  -- ^ "@infixr"
+  | FixityNone   -- ^ "@infix" (non-associative)
+  deriving stock (Eq, Generic, Ord, Show)
+  deriving anyclass (ToExpr, NFData)
+
+-- | Render the herald that produced a 'FixityDirection'.
+fixityHerald :: FixityDirection -> Text
+fixityHerald = \ case
+  FixityLeft  -> "@infixl"
+  FixityRight -> "@infixr"
+  FixityNone  -> "@infix"
+
+data TIdentifiers
+  = TIdentifier !Text
+  | TQuoted     !Text
+  | TGenitive
+  deriving stock (Eq, Generic, Ord, Show)
+  deriving anyclass (ToExpr, NFData)
+
+data TSymbols
+  = TRefOpen
+  | TRefClose
+  | TNlgOpen
+  | TNlgClose
+  | TParagraph
+  | TBullet      -- • offside bullet-list marker
+  | TPOpen
+  | TPClose
+  | TCOpen
+  | TCClose
+  | TComma
+  | TSemicolon
+  | TDot
+  | TEllipsis    -- ... for asyndetic conjunction (implicit AND)
+  | TEllipsisOr  -- .. for asyndetic disjunction (implicit OR)
+  | TColon
+  | TPercent
+  | TCopy (Maybe TokenType)
+  | TOtherSymbolic !Text
+  deriving stock (Eq, Generic, Ord, Show)
+  deriving anyclass (ToExpr, NFData)
+
+symbols :: Map Text TSymbols
+symbols = Map.fromList
+  [ ("^" , TCopy Nothing)
+  , ("(" , TPOpen)
+  , (")" , TPClose)
+  , ("{" , TCOpen)
+  , ("}" , TCClose)
+  , ("<<", TRefOpen)
+  , (">>", TRefClose)
+  , ("[" , TNlgOpen)
+  , ("]" , TNlgClose)
+  , ("§" , TParagraph)
+  , ("•" , TBullet)
+  , ("," , TComma)
+  , (";" , TSemicolon)
+  , ("." , TDot)
+  , ("...", TEllipsis)    -- three dots = implicit AND (must be before .. due to prefix)
+  , (".." , TEllipsisOr)  -- two dots = implicit OR
+  , ("%" , TPercent)
+  , (":" , TColon)
+  ]
+
+data TKeywords
+  = TKGiven
+  | TKGiveth
+  | TKGives   -- Synonym for TKGiveth
+  | TKDecide
+  | TKExact
+  | TKMeans
+  | TKDeclare
+  | TKIf
+  | TKBranch
+  | TKThen
+  | TKElse
+  | TKOtherwise
+  | TKAnd
+  | TKOr
+  | TKRAnd
+  | TKROr
+  | TKNot
+  | TKIs
+  | TKHas
+  | TKOne
+  | TKOf
+  | TKWith
+  | TKWithal
+  | TKA
+  | TKAn
+  | TKThe
+  | TKYield
+  | TKConsider
+  | TKWhere
+  | TKList
+  | TKAssume
+  | TKWhen
+  | TKType
+  | TKParty
+  | TKDo
+  | TKDoes
+  | TKMust
+  | TKMay
+  | TKShant
+  | TKBreach
+  | TKRefuse
+  | TKRefused
+  | TKBecause
+  | TKProvided
+  | TKWithin
+  | TKHence
+  | TKLest
+  | TKFunction
+  | TKFrom
+  | TKTo
+  | TKEquals
+  | TKImplies
+  | TKPlus
+  | TKMinus
+  | TKTimes
+  | TKDivided
+  | TKModulo
+  | TKBy
+  | TKGreater
+  | TKLess
+  | TKThan
+  | TKAbove
+  | TKBelow
+  | TKAt
+  | TKStarting
+  | TKLeast
+  | TKMost
+  | TKFollowed
+  | TKFor
+  | TKAll
+  | TKAka
+  | TKImport
+  | TKFetch
+  | TKPost
+  | TKEnv
+  | TKRecord
+  | TKCommit
+  | TKAttest
+  | TKRecall
+  | TKOfficial
+  | TKConcat
+  | TKAs
+  | TKLet
+  | TKIn
+  | TKBe
+  | TKMean
+  | TKUnless
+  | TKTypically
+  | TKEvery      -- ^ @EVERY@: the quantified deonton head (EVERY-EACH-QUANTIFIER-SPEC §2.4)
+  | TKWho        -- ^ @WHO@: the quantifier filter (spec §2.1)
+  | TKWhose      -- ^ @WHOSE@: the possessive quantifier filter, whose operands
+                 -- name FIELDS of the cast by position (spec §13.6, ruled
+                 -- 2026-09-21)
+  | TKOnce       -- ^ @ONCE@: the barrier\/threshold join, @ONCE ALL HAVE@ (spec §2.2.7.4, R-T1)
+  | TKHave       -- ^ @HAVE@: @ONCE ALL HAVE@ (spec §2.2.7.4)
+  | TKSome       -- ^ @SOME@: @SOME m OF@ (spec §2.2.7.4, R-T5); lexed now, parsed in phase 3
+  | TKUpon       -- ^ @UPON@: the fork join, @UPON EACH@ (R-Q1 RULED 2026-09-07, spec §2.4\/§2.5).
+                 --   This is the JOIN-line position only. @UPON \<event\>@ as a /rule head/ —
+                 --   'specs\/todo\/UPON-EXTERNAL-EVENTS-SPEC.md', status OPEN — is a different
+                 --   construct in a different position and is still unbuilt; reserving the word
+                 --   here does not build it, and the two are distinguished by position.
+  | TKAfter      -- ^ @AFTER@: the window's OPENING edge, @AFTER d [OF anchor]@ \/ @AFTER \<date\>@
+                 --   (EVERY-EACH-QUANTIFIER-SPEC §5.1.2, R-X5; built 2026-09-16)
+  | TKBefore     -- ^ @BEFORE@: the window's absolute CLOSING edge, @BEFORE \<date\>@ (§5.1.2, R-X5;
+                 --   built 2026-09-16). A duration there is a check error naming @WITHIN@.
+  deriving stock (Eq, Generic, Ord, Show)
+  deriving anyclass (ToExpr, NFData)
+
+keywords :: Map Text TKeywords
+keywords = Map.fromList
+  [ ("GIVEN"      , TKGiven      )
+  , ("GIVETH"     , TKGiveth     )
+  , ("GIVES"      , TKGives      )
+  , ("DECIDE"     , TKDecide     )
+  , ("EXACTLY"    , TKExact      )
+  , ("MEANS"      , TKMeans      )
+  , ("DECLARE"    , TKDeclare    )
+  , ("IF"         , TKIf         )
+  , ("BRANCH"     , TKBranch     )
+  , ("THEN"       , TKThen       )
+  , ("ELSE"       , TKElse       )
+  , ("OTHERWISE"  , TKOtherwise  )
+  , ("AND"        , TKAnd        )
+  , ("OR"         , TKOr         )
+  , ("RAND"       , TKRAnd       )
+  , ("ROR"        , TKROr        )
+  , ("NOT"        , TKNot        )
+  , ("IS"         , TKIs         )
+  , ("ONE"        , TKOne        )
+  , ("OF"         , TKOf         )
+  , ("WITH"       , TKWith       )
+  , ("WITHAL"     , TKWithal     )
+  , ("A"          , TKA          )
+  , ("AN"         , TKAn         )
+  , ("HAS"        , TKHas        )
+  , ("THE"        , TKThe        )
+  , ("YIELD"      , TKYield      )
+  , ("CONSIDER"   , TKConsider   )
+  , ("WHERE"      , TKWhere      )
+  , ("LIST"       , TKList       )
+  , ("ASSUME"     , TKAssume     )
+  , ("WHEN"       , TKWhen       )
+  , ("TYPE"       , TKType       )
+  , ("PARTY"      , TKParty      )
+  , ("DO"         , TKDo         )
+  , ("DOES"       , TKDoes       )
+  , ("MUST"       , TKMust       )
+  , ("MAY"        , TKMay        )
+  , ("SHANT"      , TKShant      )
+  , ("BREACH"     , TKBreach     )
+  , ("REFUSE"     , TKRefuse     )
+  , ("REFUSED"    , TKRefused    )
+  , ("BECAUSE"    , TKBecause    )
+  , ("PROVIDED"   , TKProvided   )
+  , ("WITHIN"     , TKWithin     )
+  , ("HENCE"      , TKHence      )
+  , ("LEST"       , TKLest       )
+  , ("FUNCTION"   , TKFunction   )
+  , ("FROM"       , TKFrom       )
+  , ("TO"         , TKTo         )
+  , ("EQUALS"     , TKEquals     )
+  , ("IMPLIES"    , TKImplies    )
+  , ("PLUS"       , TKPlus       )
+  , ("MINUS"      , TKMinus      )
+  , ("TIMES"      , TKTimes      )
+  , ("DIVIDED"    , TKDivided    )
+  , ("MODULO"     , TKModulo     )
+  , ("BY"         , TKBy         )
+  , ("GREATER"    , TKGreater    )
+  , ("LESS"       , TKLess       )
+  , ("THAN"       , TKThan       )
+  , ("ABOVE"      , TKAbove      )
+  , ("BELOW"      , TKBelow      )
+  , ("AT"         , TKAt         )
+  , ("STARTING"   , TKStarting   )
+  , ("LEAST"      , TKLeast      )
+  , ("MOST"       , TKMost       )
+  , ("FOLLOWED"   , TKFollowed   )
+  , ("FOR"        , TKFor        )
+  , ("ALL"        , TKAll        )
+  , ("AKA"        , TKAka        )
+  , ("IMPORT"     , TKImport     )
+  , ("FETCH"      , TKFetch      )
+  , ("POST"       , TKPost       )
+  , ("ENV"        , TKEnv        )
+  , ("RECORD"     , TKRecord     )
+  , ("COMMIT"     , TKCommit     )
+  , ("ATTEST"     , TKAttest     )
+  , ("RECALL"     , TKRecall     )
+  , ("OFFICIAL"   , TKOfficial   )
+  , ("CONCAT"     , TKConcat     )
+  , ("AS"         , TKAs         )
+  , ("LET"        , TKLet        )
+  , ("IN"         , TKIn         )
+  , ("BE"         , TKBe         )
+  , ("MEAN"       , TKMean       )
+  , ("UNLESS"     , TKUnless     )
+  , ("TYPICALLY"  , TKTypically  )
+  , ("EVERY"      , TKEvery      )
+  , ("WHO"        , TKWho        )
+  , ("WHOSE"      , TKWhose      )
+  , ("ONCE"       , TKOnce       )
+  , ("HAVE"       , TKHave       )
+  , ("SOME"       , TKSome       )
+  , ("UPON"       , TKUpon       )
+  , ("AFTER"      , TKAfter      )
+  , ("BEFORE"     , TKBefore     )
+  ]
+
+data TOperators
+  = TTimes
+  | TPlus
+  | TMinus
+  | TGreaterEquals
+  | TLessEquals
+  | TGreaterThan
+  | TLessThan
+  | TEquals
+  | TEqualsEquals
+  | TNotEquals
+  | TAnd
+  | TOr
+  | TImplies
+  | TDividedBy
+  deriving stock (Eq, Generic, Ord, Show)
+  deriving anyclass (ToExpr, NFData)
+
+operators :: Map Text TOperators
+operators = Map.fromList
+  [ ("*" , TTimes        )
+  , ("+" , TPlus         )
+  , ("-" , TMinus        )
+  , (">=", TGreaterEquals)
+  , ("<=", TLessEquals   )
+  , (">" , TGreaterThan  )
+  , ("<" , TLessThan     )
+  , ("=" , TEquals       )
+  , ("==", TEqualsEquals )
+  , ("&&", TAnd          )
+  , ("||", TOr           )
+  , ("=>", TImplies      )
+  , ("/" , TDividedBy    )
+  ]
+
+
+data TSpaces
+  = TSpace        !Text
+  | TLineComment  !Text
+  | TBlockComment !Text
+  | TIgnoredAnnotation !Text !Text
+    -- ^ @\@name rest@: an annotation line this version of L4 cannot use. Either
+    -- the name is not one of 'knownAnnotationHeralds', or it is one and the line
+    -- does not have the form it needs (a bare @\@lang@). The first field is the
+    -- name WITHOUT the @\@@; the second is the rest of the line, verbatim, which
+    -- an annotation always takes ('lineAnno'). It is trivia, as a comment is, so
+    -- no parser position can reject it and exactprint reproduces it byte for
+    -- byte; a warning ("L4.IgnoredAnnotation") is the only trace it leaves.
+  | EOF
+  deriving stock (Eq, Generic, Ord, Show)
+  deriving anyclass (ToExpr, NFData)
+
+data TLiterals
+  = TIntLit       !Text !Integer
+  | TRationalLit  !Text !Rational
+  | TStringLit    !Text !Text
+  -- ^ @TStringLit raw decoded@. The first field is the verbatim source slice
+  -- (including quotes and any escapes as written); the second is the decoded
+  -- value. Keeping the raw slice — mirroring 'TIntLit'/'TRationalLit' — lets
+  -- exactprint reproduce the source byte-for-byte instead of re-escaping
+  -- non-ASCII characters through 'showLitString'.
+  deriving stock (Eq, Generic, Ord, Show)
+  deriving anyclass (ToExpr, NFData)
+
+-- | The type of token, plus information needed to reconstruct its contents.
+data TokenType
+  = TDirectives  !TDirectives
+  | TLiterals    !TLiterals
+  | TSpaces      !TSpaces
+  | TKeywords    !TKeywords
+  | TAnnotations !TAnnotations
+  | TSymbols     !TSymbols
+  | TIdentifiers !TIdentifiers
+  | TOperators   !TOperators
+  deriving stock (Eq, Generic, Ord, Show)
+  deriving anyclass (ToExpr, NFData)
+
+-- | The annotation names the editor offers as completions ("LSP.L4.Actions").
+-- Four of them: this is NOT the list of annotations the lexer knows, which is
+-- 'knownAnnotationHeralds'.
+annotations :: [Text]
+annotations = ["nlg", "ref", "ref-map", "ref-src"]
+
+-- | The name (without the @\@@) of every annotation this version of L4 knows.
+--
+-- Two things read this and must agree with the lexers below: 'ignoredAnnotation'
+-- lexes any @\@name@ the lexers above it refused as trivia, and the warning for
+-- an unknown one suggests the nearest of these (a known name is warned about as
+-- malformed instead). "UnknownAnnotationSpec" reads a name off a token of every
+-- kind, by a function that must cover every constructor, and checks that the
+-- set of names is this list: an annotation added to the lexer and not here, or
+-- here and not to the lexer, fails that test.
+knownAnnotationHeralds :: [Text]
+knownAnnotationHeralds =
+  [ "desc", "ends-because", "export", "infix", "infixl", "infixr", "lang", "nlg"
+  , "nonassertable", "nonexhaustive", "ref", "ref-map", "ref-src"
+  ]
+
+-- | The name after the @\@@ of an annotation: a letter, then letters, digits
+-- and underscores, with hyphens allowed BETWEEN those, the way @ref-src@ is
+-- spelled. A hyphen not followed by one of them ends the name, so @\@desc-- note@
+-- is @\@desc@ and a comment.
+annotationName :: Lexer Text
+annotationName =
+  Text.cons <$> satisfy isAlpha <*> (Text.concat <$> many (nameWord <|> try hyphenatedWord))
+  where
+    nameWord = takeWhile1P (Just "annotation name character") isAnnotationNameChar
+    hyphenatedWord = Text.cons <$> char '-' <*> nameWord
+
+-- | A character that can continue an annotation's name (after a letter).
+isAnnotationNameChar :: Char -> Bool
+isAnnotationNameChar c = isAlphaNum c || c == '_'
+
+-- | An annotation line no annotation lexer above accepted: @\@name@, then the
+-- rest of the line. Lexed as trivia and warned about, as GHC treats an unknown
+-- @{-# FOO #-}@ pragma ('-Wunrecognised-pragmas'), so that a module written for
+-- a newer L4 still loads, checks and highlights in an older one.
+--
+-- That covers two cases, told apart only by the warning ("L4.IgnoredAnnotation"
+-- looks the name up in 'knownAnnotationHeralds'):
+--
+--   * a name L4 has no annotation for (@\@exprot@, or one from a newer L4);
+--   * a name it does know whose own lexer refused the line. Only @\@lang@ can
+--     be refused: the rest accept a bare herald, a trailing space, a tab and a
+--     non-ASCII letter after them. A bare @\@lang@,
+--     @\@lang<TAB>en@ and a non-ASCII code are plausible typos, and a lexer
+--     error on any of them leaves the file with no semantic tokens at all.
+--
+-- Nothing is stricter than "an @\@, then a letter". An @\@ followed by anything
+-- else is not the shape of an annotation, so no annotation of any version can
+-- take that form, and it stays a lexer error.
+--
+-- Order matters: this is a 'spacesPayload' alternative, and 'tokenPayload' tries
+-- 'annotationsPayload' first, so a well-formed known annotation never reaches it.
+--
+-- The annotation shape (an @\@, then a letter) is decided by looking ahead, and a
+-- line that does not have it fails here at the @\@ having said nothing. That
+-- matters for the one error that remains: megaparsec keeps the failure that got
+-- furthest, so a 'try' that consumed the @\@ before failing left its own
+-- failure behind and the message read "expecting end of input or whitespace",
+-- where it used to list every token that could have stood there. Once the shape
+-- is confirmed nothing below can fail.
+ignoredAnnotation :: Lexer TSpaces
+ignoredAnnotation = do
+  isAnnotation <- lookAhead ((True <$ try (char '@' *> satisfy isAlpha)) <|> pure False)
+  unless isAnnotation empty
+  _ <- char '@'
+  name <- annotationName
+  TIgnoredAnnotation name <$> takeWhileP (Just "character") (/= '\n')
+
+nlgAnnotation :: Lexer (Maybe LangTag, Text, AnnoType)
+nlgAnnotation =
+  lineNlgAnno
+    <|> (\ (t, ty) -> (Nothing, t, ty)) <$> inlineNlgAnno
+  <?> "Natural Language Generation Annotation"
+
+-- | @\@nlg@ or @\@nlg:he@, then the rest of the line.
+--
+-- Deliberately NOT a widening of 'lineAnno': that is shared by @\@ref-src@,
+-- @\@ref-map@, @\@desc@, @\@export@, @\@infixl@ and @\@nonexhaustive@, none
+-- of which takes a colon parameter.
+lineNlgAnno :: Lexer (Maybe LangTag, Text, AnnoType)
+lineNlgAnno = do
+  _ <- string "@nlg"
+  mtag <- optional langTag
+  t <- takeWhileP (Just "character") (/= '\n')
+  pure (mtag, t, LineAnno)
+
+-- | @:he@. Backtracks whole, so a colon that does not begin a well-formed tag
+-- stays ordinary annotation text — @\@nlg: see below@ means what it did before
+-- tags existed.
+langTag :: Lexer LangTag
+langTag =
+  try (char ':' *> (MkLangTag <$> takeWhile1P (Just "language subtag") isLangTagChar))
+
+isLangTagChar :: Char -> Bool
+isLangTagChar c = isAsciiLower c || isAsciiUpper c || isDigit c || c == '-'
+
+nlgInlineAnnotationCloseChar :: Char
+nlgInlineAnnotationCloseChar = ']'
+
+nlgInlineAnnotationOpenChar :: Char
+nlgInlineAnnotationOpenChar = '['
+
+refAnnotation :: Lexer (Text, AnnoType)
+refAnnotation =
+  lineAnno "@ref"
+    <|> inlineRefAnno
+  <?> "Reference Annotation"
+
+refSrcAnnotation :: Lexer Text
+refSrcAnnotation = fst <$> lineAnno "@ref-src"
+
+refMapAnnotation :: Lexer Text
+refMapAnnotation = fst <$> lineAnno "@ref-map"
+
+-- | @\@lang he@ — a module's default language.
+--
+-- Deliberately NOT a 'lineAnno': the subtag's SHAPE is checked here, by the
+-- same 'isLangTagChar' as @\@nlg:he@, so the two spellings cannot drift into
+-- disagreeing about what a subtag is. Everything after the subtag is kept
+-- verbatim (a trailing comment is ordinary), so exactprint re-emits the line
+-- byte for byte including the author's spacing.
+--
+-- 'try', so that a herald which merely starts with these characters is not
+-- half-consumed on the way to failing.
+langAnnotation :: Lexer (LangTag, Text)
+langAnnotation = try $ do
+  _    <- string "@lang"
+  sp   <- takeWhile1P (Just "space") (== ' ')
+  tag  <- takeWhile1P (Just "language subtag") isLangTagChar
+  rest <- takeWhileP (Just "character") (/= '\n')
+  pure (MkLangTag tag, sp <> tag <> rest)
+
+descAnnotation :: Lexer Text
+descAnnotation = fst <$> lineAnno "@desc"
+
+exportAnnotation :: Lexer Text
+exportAnnotation = fst <$> lineAnno "@export"
+
+-- | Fixity annotations: "@infixl", "@infixr", "@infix".
+-- NOTE: "@infix" is a prefix of the other two heralds, so it must be tried last.
+fixityAnnotation :: Lexer (FixityDirection, Text)
+fixityAnnotation =
+      ((FixityLeft,)  . fst <$> lineAnno "@infixl")
+  <|> ((FixityRight,) . fst <$> lineAnno "@infixr")
+  <|> ((FixityNone,)  . fst <$> lineAnno "@infix")
+
+nonexhaustiveAnnotation :: Lexer Text
+nonexhaustiveAnnotation = fst <$> lineAnno "@nonexhaustive"
+
+-- | @\@ends-because <reason>@: the herald, then the rest of the line, which is
+-- the reason. A 'lineAnno', like @\@desc@, so the reason is free text that
+-- exactprint reproduces byte for byte. An empty reason lexes (a bare
+-- @\@ends-because@): the type checker refuses it, in words, rather than the
+-- lexer in a token error.
+endsBecauseAnnotation :: Lexer Text
+endsBecauseAnnotation = fst <$> lineAnno "@ends-because"
+
+-- | @\@nonassertable@ takes nothing: it is the herald alone, and whatever
+-- follows it on the line is read as source. So a definition written after it
+-- on the same line is still parsed (and the mark is then reported as not on a
+-- line of its own), and prose after it is a parse error; a line annotation
+-- would swallow both silently.
+--
+-- 'try', because the herald has been consumed when the next character is
+-- refused, and an alternative that fails after consuming ends the whole lexer
+-- instead of letting 'ignoredAnnotation' read @\@nonassertablex@ as an
+-- annotation this version does not know.
+nonassertableAnnotation :: Lexer ()
+nonassertableAnnotation = () <$ try (string "@nonassertable" <* notFollowedBy (satisfy (\ c -> isAlphaNum c || c == '_')))
+
+-- | A run of literal text inside an NLG annotation.
+--
+-- This is the RENDER-side lexer: it runs over the text an annotation already
+-- captured, so it looks like the right place to DECODE escapes. It is not.
+-- The annotation token keeps the raw slice (see 'inlineNlgAnno'), because
+-- 'toNlgAnno' re-emits that text verbatim for exactprint.
+--
+-- A backslash escape is consumed as a UNIT and kept VERBATIM — @\\%@ stays the
+-- two characters @\\@ and @%@. Two things follow, and both are the point:
+--
+--   * the @%@ inside @\\%@ never reaches 'nlgExprDelimiter', so it cannot open
+--     an interpolation. That is what makes @10\\%and\\%20@ mean what it says
+--     instead of silently rendering as @10\`and\`20@.
+--   * 'displayTokenType' re-emits this text for exactprint, so keeping the
+--     backslash is what makes @l4 format@ round-trip. DECODING HERE IS A BUG:
+--     it was written that way first, and the formatter duly stripped the
+--     backslash, turning a correct annotation into one that either fails to
+--     parse (@\\]@) or silently changes meaning (@\\%@).
+--
+-- Decoding happens once, at render time, in 'L4.Nlg.unescapeNlgText'.
+nlgString :: Lexer Text
+nlgString =
+  Text.concat <$> some (escaped <|> plain <|> loneBackslash)
+  where
+    escaped = try (Text.cons <$> char '\\' <*> (Text.singleton <$> satisfy isNlgEscapable))
+    plain = takeWhile1P (Just "character") (\c -> not (isNlgSpecial c) && not (isSpace c))
+
+    -- A backslash that cannot begin an escape is an ordinary character, which
+    -- is exactly what it was before escapes existed. Without this alternative
+    -- an annotation whose text ENDS in a backslash stops lexing altogether —
+    -- @\@nlg a discount of 50\\@ — because 'escaped' needs a character after
+    -- the backslash and 'plain' excludes it. There is no closing herald on a
+    -- line annotation, so there is nothing there to escape.
+    loneBackslash = Text.singleton <$> char '\\'
+
+    isNlgSpecial c = c == '\\' || c `elem` nlgSpecialChars
+    nlgSpecialChars =
+      [ nlgInlineAnnotationCloseChar
+      , nlgExprDelimiterSymbol
+      ]
+
+-- | The characters a backslash may escape inside an NLG annotation.
+--
+-- This set is deliberately EQUAL to the set 'L4.Nlg.unescapeNlgText' decodes.
+-- A lexer that swallows a @\\x@ the decoder will not decode is how a stray
+-- backslash changes what an annotation captures without changing what it
+-- renders: the two sides disagree about whether an escape happened. Any other
+-- @\\x@ is two ordinary characters, on both sides alike.
+--
+-- __The open bracket is here even though it never needs escaping__ (ruled
+-- 2026-09-19). A bare @[@ is ordinary text in both annotation forms — it does
+-- not nest and it cannot end an annotation — so @\\[@ protects nothing. It is
+-- accepted because an author who escapes the closing bracket of a citation
+-- will escape its opening bracket in the same keystroke, @[see note \\[3\\]
+-- here]@, and the asymmetric set rendered that as @see note \\[3] here@: the
+-- @\\]@ decoded, the @\\[@ did not, and a backslash the author never meant to
+-- write reached the generated prose. That failure is SILENT — no diagnostic,
+-- no parse error, just a wrong character in the output — which is the kind
+-- worth spending a rule on. Accepting the habit costs nothing, because the two
+-- spellings now decode to the same text.
+isNlgEscapable :: Char -> Bool
+isNlgEscapable c =
+  c == '\\'
+    || c == nlgExprDelimiterSymbol
+    || c == nlgInlineAnnotationCloseChar
+    || c == nlgInlineAnnotationOpenChar
+
+-- | The characters a backslash may escape inside an @\@ref@ annotation.
+--
+-- Deliberately NOT the same set as 'isNlgEscapable': @%@ and @]@ are ordinary
+-- text in a citation, and an escape nobody needs is one more way to surprise a
+-- reader. Only the closing herald's character, and the backslash itself.
+isRefEscapable :: Char -> Bool
+isRefEscapable c = c == '\\' || c == '>'
+
+-- | Decode the backslash escapes an @\@ref@ annotation may carry.
+--
+-- Applied once, where the parser stores the citation on the 'L4.Syntax.Ref'
+-- node. That is safe, and it was measured rather than assumed: the exact
+-- printer walks the annotation's TOKENS ('L4.ExactPrint.exactprint' is
+-- @concreteNodesToTokens@ then @displayPosToken@), not the 'Text' the node
+-- carries. Mangling that 'Text' and re-running the suite turns three reader
+-- tests red — Blawx twice and Catala's literate weave — while @exactprint
+-- identity@ stays green, which is the whole argument.
+--
+-- Contrast 'L4.Nlg.unescapeNlgText', which canNOT decode at its node, because
+-- 'L4.Syntax.MkNlgText' IS re-emitted by 'L4.Print'. Same feature, opposite
+-- placement, and the difference is which layer the printer reads.
+unescapeRefText :: Text -> Text
+unescapeRefText t
+  | not (Text.any (== '\\') t) = t
+  | otherwise = Text.pack (go (Text.unpack t))
+  where
+    go = \ case
+      '\\' : c : rest | isRefEscapable c -> c : go rest
+      c : rest -> c : go rest
+      [] -> []
+
+nlgExprDelimiter :: Lexer Char
+nlgExprDelimiter =
+  satisfy (== nlgExprDelimiterSymbol)
+
+nlgExprDelimiterSymbol :: Char
+nlgExprDelimiterSymbol = '%'
+
+-- | The NLG inline annotation, @[...]@, in which a backslash escapes.
+--
+-- @[a \\] b]@ is one annotation whose text is @a \\] b@, rather than truncating
+-- at the first @]@ and leaving @ b]@ to fail the enclosing parse with
+-- @unexpected ]@.
+--
+-- The backslash is KEPT in the captured text. That text is what 'toNlgAnno'
+-- re-emits for exactprint, so dropping it here would make the printer lose the
+-- escape and change the annotation's meaning on the next parse. Decoding
+-- happens on the render side; see 'L4.Nlg.unescapeNlgText'.
+--
+-- The single thing this costs: @[note\\]@, a backslash immediately before the
+-- terminator, no longer closes the annotation, because @\\]@ is now an escaped
+-- @]@. Write @[note\\\\]@ for a trailing backslash. Measured 2026-09-17: zero
+-- @.l4@ files in the tree contain a backslash at all, so nothing existing is
+-- affected -- which is a measurement, not a guarantee.
+inlineNlgAnno :: Lexer (Text, AnnoType)
+inlineNlgAnno = do
+  _o <- char nlgInlineAnnotationOpenChar
+  anno <- Text.concat <$> many (escapedChar <|> plainChunk <|> loneBackslash)
+  _c <- char nlgInlineAnnotationCloseChar
+  pure (anno, InlineAnno)
+  where
+    escapedChar = try (Text.cons <$> char '\\' <*> (Text.singleton <$> satisfy isNlgEscapable))
+    plainChunk =
+      takeWhile1P (Just "character") (\c -> c /= '\\' && c /= nlgInlineAnnotationCloseChar)
+    -- As in 'nlgString': a backslash that cannot begin an escape stays an
+    -- ordinary character, so @[note\\q]@ still lexes and still means what it
+    -- meant. Every alternative consumes at least one character, so 'many'
+    -- cannot spin on a zero-width success.
+    loneBackslash = Text.singleton <$> char '\\'
+
+-- | The @\@ref@ inline annotation, @\<\<...\>\>@, in which a backslash escapes.
+--
+-- @\<\<see s.5 \\\>\> onward\>\>@ is one annotation whose text is
+-- @see s.5 \\\>\> onward@, rather than terminating at the first @\>\>@ and
+-- leaving the remainder to fail the enclosing parse. Before this, a literal
+-- @\>\>@ inside a citation was unrepresentable (ruled 2026-09-17).
+--
+-- Two details that are not decoration:
+--
+--   * A LONE @\>@ is still ordinary text — @\<\<a \> b\>\>@ has always worked and
+--     must keep working, so a @\>@ that does not complete the herald falls
+--     through to 'loneGt'. This is why the closing herald is matched whole
+--     rather than by its first character.
+--   * The backslash is KEPT here, verbatim, and decoded later by
+--     'unescapeRefText' where the parser builds the 'L4.Syntax.Ref'. The token
+--     is what exactprint re-emits, so dropping the backslash here would lose
+--     the escape on the next parse.
+inlineRefAnno :: Lexer (Text, AnnoType)
+inlineRefAnno = do
+  _o <- string "<<"
+  anno <- Text.concat <$> many (escapedChar <|> plainChunk <|> loneBackslash <|> loneGt)
+  _c <- string ">>"
+  pure (anno, InlineAnno)
+  where
+    escapedChar = try (Text.cons <$> char '\\' <*> (Text.singleton <$> satisfy isRefEscapable))
+    plainChunk = takeWhile1P (Just "character") (\c -> c /= '\\' && c /= '>')
+    -- A backslash that cannot begin an escape stays an ordinary character, as
+    -- it was before escapes existed.
+    loneBackslash = Text.singleton <$> char '\\'
+    -- A '>' that does not complete the closing herald.
+    loneGt = try (notFollowedBy (string ">>") *> (Text.singleton <$> char '>'))
+
+
+lineAnno :: Text -> Lexer (Text, AnnoType)
+lineAnno herald = do
+  _ <- string herald
+  (, LineAnno) <$> takeWhileP (Just "character") (/= '\n')
+
+whitespace :: Lexer Text
+whitespace =
+  takeWhile1P (Just "whitespace") isSpace
+
+lineComment :: Lexer Text
+lineComment =
+  (<>) <$> (string "--" <|> string "//") <*> takeWhileP (Just "character") (/= '\n')
+
+blockComment :: Lexer Text
+blockComment =
+      (\ b (c, e) -> Text.concat (b : c ++ [e])) <$> string "{-" <*> manyTill_ inner (string "-}")
+  <|> (\ b (c, e) -> Text.concat (b : c ++ [e])) <$> string "/*" <*> manyTill_ inner (string "*/")
+  where
+    inner = blockComment <|> Text.singleton <$> anySingle
+
+-- | Lex a string literal, returning @(raw, decoded)@: the verbatim source
+-- slice (quotes included) and the escape-decoded value. 'Megaparsec.match'
+-- captures the raw slice so exactprint can reproduce it exactly.
+stringLiteral :: Lexer (Text, Text)
+stringLiteral =
+  Megaparsec.match (char '"' *> (Text.pack <$> manyTill Lexer.charLiteral (char '"')))
+
+-- | A quoted identifier between backticks.
+quoted :: Lexer Text
+quoted =
+  char '`' *> takeWhile1P (Just "printable char except backticks") (\ x -> isPrint x && not (x `elem` ("`" :: String))) <* char '`'
+
+directiveLiteral :: Lexer TDirectives
+directiveLiteral = do
+  _herald <- "#"
+  -- Try directive keywords first (e.g., EVAL, EVALTRACE, CHECK, etc.)
+  -- then fall back to continuation marker (just "# " with nothing else)
+  getAlt (foldMap (\(t, d) -> Alt $ d <$ chunk t) $ Map.toDescList directives)
+    -- we use toDescList to make sure that longer tokens with common prefixes
+    -- appear before shorter ones, in particular EVALTRACE before EVAL
+    <|> (TDirectiveContinue <$ lookAhead (char ' '))
+    -- "# " (hash-space) is a directive continuation marker
+
+integerLiteral :: Lexer (Text, Integer)
+integerLiteral =
+      (\ x (xs, i) -> (x <> xs, negate i)) <$> string "-" <*> decimal
+  <|> decimal
+
+decimal :: Lexer (Text, Integer)
+decimal = decimal_ <?> "integer"
+
+-- | Parse a non-empty run of decimal digits. Underscores are accepted
+-- between digits as visual thousand-separators (e.g. @100_000@) and are
+-- stripped before computing the numeric value. A leading digit is
+-- required and the run must not end with an underscore.
+decimal_ :: Lexer (Text, Integer)
+decimal_ = do
+  d0   <- satisfy isDigit
+  rest <- takeWhileP (Just "digit") (\c -> isDigit c || c == '_')
+  let s = Text.cons d0 rest
+  -- Disallow trailing underscores. `d0` is already a digit, so the
+  -- start of the run is fine; only the tail needs guarding.
+  when (Text.last s == '_') empty
+  pure (s, mkNum s)
+  where
+    mkNum :: Text -> Integer
+    mkNum = foldl' step 0 . chunkToTokens (Proxy :: Proxy Text)
+    step a '_' = a
+    step a c   = a * 10 + fromIntegral (digitToInt c)
+
+rationalLiteral :: Lexer (Text, Rational)
+rationalLiteral =
+      (\ x (xs, i) -> (x <> xs, negate i)) <$> string "-" <*> floatP
+  <|> floatP
+{-# INLINE rationalLiteral #-}
+
+floatP :: Lexer (Text, Rational)
+floatP = float_ <?> "float"
+{-# INLINE floatP #-}
+
+float_ :: Lexer (Text, Rational)
+float_ = do
+  (t, c') <- decimal_
+  (c, e, t2) <- dotDecimal_ c'
+  pure (t <> "." <> t2, realToFrac $ Sci.scientific c e)
+{-# INLINE float_ #-}
+
+dotDecimal_ :: Integer -> Lexer (Integer, Int, Text)
+dotDecimal_ c' = do
+  void (satisfy (== '.'))
+  -- Same shape as 'decimal_': accept @_@ between digits as a visual
+  -- separator and strip them from the fold so the exponent stays in sync.
+  d0   <- satisfy isDigit
+  rest <- takeWhileP (Just "digit") (\c -> isDigit c || c == '_')
+  let s = Text.cons d0 rest
+  when (Text.last s == '_') empty
+  let mkNum = foldl' step (c', 0) . chunkToTokens (Proxy :: Proxy Text)
+      step (a, e') '_' = (a, e')
+      step (a, e') c   =
+          ( (a * 10 + fromIntegral (digitToInt c))
+          , (e' - 1)
+          )
+  let (c, e) = mkNum s
+  pure (c, e, s)
+{-# INLINE dotDecimal_ #-}
+
+literalPayload :: Lexer TLiterals
+literalPayload = asum
+  [ uncurry TRationalLit <$> try rationalLiteral
+  , uncurry TIntLit      <$> try integerLiteral
+  , uncurry TStringLit   <$> stringLiteral
+  ]
+
+identifiersPayload :: Lexer TIdentifiers
+identifiersPayload = asum
+  [ TGenitive <$  string "'s"
+  , TQuoted   <$> quoted
+  ]
+
+annotationsPayload :: Lexer TAnnotations
+annotationsPayload = asum
+  [ TRefSrc       <$> refSrcAnnotation
+  , TRefMap       <$> refMapAnnotation
+  , uncurry TLang <$> langAnnotation
+  , TDesc         <$> descAnnotation
+  , TExport       <$> exportAnnotation
+  , uncurry TFixity <$> fixityAnnotation
+  , TNonexhaustive      <$> nonexhaustiveAnnotation
+  , TNonassertable      <$  nonassertableAnnotation
+  , TEndsBecause        <$> endsBecauseAnnotation
+  , (\ (mtag, t, ty) -> TNlg mtag t ty) <$> nlgAnnotation
+  , uncurry TRef  <$> refAnnotation
+  ]
+
+spacesPayload :: Lexer TSpaces
+spacesPayload = asum
+  [ TSpace        <$> whitespace
+  , TLineComment  <$> lineComment
+  , TBlockComment <$> blockComment
+  , ignoredAnnotation
+  ]
+
+symbolsPayload :: Lexer TSymbols
+symbolsPayload
+  = asum
+  $ map (\(t, sym) -> sym <$ string t)
+  $ sortOn (Down . Text.length . fst)  -- try longer symbols first (e.g., ... before .)
+  $ Map.toList symbols
+
+tokenPayload :: Lexer TokenType
+tokenPayload = asum
+  [ TLiterals    <$> literalPayload
+  , TIdentifiers <$> identifiersPayload
+  , TDirectives  <$> directiveLiteral
+  , TAnnotations <$> annotationsPayload
+  , TSpaces      <$> spacesPayload
+  , TSymbols     <$> symbolsPayload
+  , TOperators   <$> operatorsPayload
+  , TSymbols . TOtherSymbolic
+                 <$> operatorString
+  , either TIdentifiers TKeywords
+                 <$> identifierOrKeyword
+  ]
+
+nlgTokenPayload :: Lexer TokenType
+nlgTokenPayload = asum
+  [ TSymbols TPercent          <$  nlgExprDelimiter
+  , TSpaces . TSpace           <$> whitespace
+  , TIdentifiers . TQuoted     <$> quoted
+  , TIdentifiers . TIdentifier <$> identifier
+  , TSymbols TNlgOpen          <$  char nlgInlineAnnotationOpenChar
+  , TSymbols TNlgClose         <$  char nlgInlineAnnotationCloseChar
+  , TAnnotations . TNlgPrefix  <$> (string "@nlg" *> optional langTag)
+  , TAnnotations . TNlgString  <$> nlgString
+  ]
+
+operatorsPayload :: Lexer TOperators
+operatorsPayload = do
+  s <- operatorString
+  maybe mzero pure (Map.lookup s operators)
+
+operatorString :: Lexer Text
+operatorString =
+  takeWhile1P (Just "operator char") (\ x -> x `elem` ("=<>+-*/:~&|%§" :: [Char]))
+
+identifierOrKeyword :: Lexer (Either TIdentifiers TKeywords)
+identifierOrKeyword = do
+  i <- identifier
+  pure case Map.lookup i keywords of
+    Nothing -> Left $ TIdentifier i
+    Just tt -> Right tt
+
+identifier :: Lexer Text
+identifier =
+  Text.cons
+  <$> satisfy isAlpha
+  <*> takeWhileP (Just "identifier char") (\ x -> isAlphaNum x || x == '_')
+
+trivialToken :: NormalizedUri -> TokenType -> PosToken
+trivialToken uri tt =
+  MkPosToken trivialRange tt
+  where
+    trivialRange :: SrcRange
+    trivialRange = MkSrcRange trivialPos trivialPos 0 uri
+
+    trivialPos :: SrcPos
+    trivialPos = MkSrcPos 0 0
+
+rawTokens :: Lexer [RawToken]
+rawTokens = many (MkRawToken <$> getOffset <*> tokenPayload <*> getOffset)
+
+rawNlgTokens :: Lexer [RawToken]
+rawNlgTokens = many (MkRawToken <$> getOffset <*> nlgTokenPayload <*> getOffset)
+
+execLexer :: NormalizedUri -> Text -> Either (NonEmpty PError) [PosToken]
+execLexer uri input =
+  case parse (rawTokens <* eof) (showNormalizedUri uri) input of
+    Right rtoks -> Right (mkPosTokens Nothing uri input rtoks)
+    Left errs   ->
+      Left $ case confusableLexError input errs of
+        -- A confusable character gets the word-processor-aware message and
+        -- structured fixes instead of megaparsec's default "unexpected …,
+        -- expecting …" list — see 'confusableLexError'. Megaparsec stops at
+        -- the first lexer error (its token stream is 'many'-based, not
+        -- backtracking), so there is at most one lexer 'PError' either way.
+        Just pErr -> pErr :| []
+        -- A lexer error is about a raw character, which is user text: it has
+        -- no token kind to name.
+        Nothing   -> bundleToPErrors "lexer" (const Nothing) errs
+
+-- | When the lexer's first failure sits on a character
+-- 'L4.SmartPunctuation.lookupConfusable' recognises, build the
+-- word-processor-aware 'PError' for it instead of megaparsec's default: name
+-- the glyph, offer a quick fix that replaces it, and — for an opening curly
+-- quote — look ahead on the same line for its matching closer and offer a
+-- single fix that straightens the whole pair at once (the same pairing
+-- rustc gives @“…”@). 'Nothing' when the failure is not on a confusable
+-- character, in which case the caller falls back to megaparsec's own
+-- message: this is additive only on the failure path, so a document that
+-- lexes today keeps lexing exactly as it did.
+--
+-- __The dash's two spellings are ordered by 'SP.dashReplacementFor', not
+-- fixed.__ Whichever spelling that heuristic would pick for THIS dash's own
+-- position (comment-shaped, or not) is listed — and therefore preferred,
+-- see 'LSP.L4.Handlers.lexErrorCodeActions' — first, so the per-diagnostic
+-- quick fix agrees with what the whole-document straighten action
+-- ('L4.SmartPunctuation.straightenWith') would have done for the identical
+-- character in the identical position. Getting this wrong is not cosmetic:
+-- a client that auto-applies the preferred fix on a dash that starts a
+-- @--@ comment must not turn it into a plain hyphen, which would still fail
+-- to parse.
+confusableLexError :: Text -> ParseErrorBundle Text Void -> Maybe PError
+confusableLexError input ParseErrorBundle{ bundleErrors, bundlePosState } = do
+  err <- case bundleErrors of
+    e :| _ -> Just e
+  off <- case err of
+    TrivialError o _ _ -> Just o
+    FancyError _ _      -> Nothing
+  guard (off < Text.length input)
+  let ch = Text.index input off
+  c <- SP.lookupConfusable ch
+  let pst1       = reachOffsetNoLine off bundlePosState
+      pst2       = reachOffsetNoLine (off + 1) pst1
+      startPos   = convertPos (pstateSourcePos pst1)
+      endPos     = convertPos (pstateSourcePos pst2)
+      span_      = MkSrcSpan startPos endPos
+      lineBefore = Text.takeWhileEnd (/= '\n') (Text.take off input)
+      singleFix = MkLexFix
+        { title = "Replace with `" <> c.replacement <> "`"
+        , edits = [(span_, c.replacement)]
+        }
+      dashFixes = case c.altReplacement of
+        Nothing              -> [singleFix]
+        Just (alt, altTitle) ->
+          let altFix = MkLexFix altTitle [(span_, alt)]
+          in if SP.dashReplacementFor lineBefore c == alt
+               then [altFix, singleFix]
+               else [singleFix, altFix]
+      pairFixes = maybe [] (: []) (pairedQuoteFix input off ch startPos)
+  pure PError
+    { message = SP.confusableMessage lineBefore c
+    , range = span_
+    , origin = "lexer"
+    , fixes = pairFixes <> dashFixes
+    , code = parseErrorCode (const Nothing) err
+    }
+
+-- | For an OPENING curly quote (@‘@ or @“@), look ahead on the REST OF THE
+-- LINE for its matching CLOSING curly quote and, if found, offer one fix
+-- that straightens both characters at once — so accepting it repairs a
+-- whole string literal or backtick name in one action, the way rustc and
+-- swiftc pair @“@/@”@. Column arithmetic (rather than a second
+-- 'reachOffsetNoLine' walk) is safe here precisely because both characters
+-- are asserted to be on the same line.
+pairedQuoteFix :: Text -> Offset -> Char -> SrcPos -> Maybe LexFix
+pairedQuoteFix input off ch startPos = do
+  closeCh <- SP.pairedQuoteCloser ch
+  let restOfLine = Text.takeWhile (/= '\n') (Text.drop (off + 1) input)
+  relIdx <- Text.findIndex (== closeCh) restOfLine
+  openC  <- SP.lookupConfusable ch
+  closeC <- SP.lookupConfusable closeCh
+  let openSpan  = MkSrcSpan startPos (startPos { column = startPos.column + 1 })
+      closeCol  = startPos.column + 1 + relIdx
+      closeStart = MkSrcPos startPos.line closeCol
+      closeSpan  = MkSrcSpan closeStart (closeStart { column = closeCol + 1 })
+  pure MkLexFix
+    { title = "Straighten this pair of quotes"
+    , edits = [(openSpan, openC.replacement), (closeSpan, closeC.replacement)]
+    }
+
+-- | The whole-document repair described atop "L4.SmartPunctuation": the
+-- concrete, real-lexer-backed instantiation of
+-- 'L4.SmartPunctuation.straightenWith' (see that module's header for why
+-- this wiring lives here rather than there). Lexes; while the first failure
+-- sits on a confusable, replaces it and lexes again; then, once the
+-- document lexes cleanly, also replaces every no-break space found inside a
+-- successfully-lexed whitespace ('TSpace') token. Returns the number of
+-- replacements made and the final text — the accepted design is one
+-- whole-document 'Language.LSP.Protocol.Types.TextEdit', because @…@ -> @...@
+-- and @—@ -> @--@ both change the text's length, so per-edit ranges could
+-- not be mapped back through earlier replacements.
+straightenDocument :: NormalizedUri -> Text -> (Int, Text)
+straightenDocument uri input = (n + m, final)
+  where
+    (n, straightened) = SP.straightenWith SP.defaultStraightenIterationCap firstErrorPos input
+    (m, final)         = replaceNbsp straightened
+
+    firstErrorPos t = case execLexer uri t of
+      Right _         -> Nothing
+      Left (e :| _)   -> Just e.range.start
+
+    replaceNbsp t = case execLexer uri t of
+      -- Still fails after the fixed point (a non-confusable error, or the
+      -- iteration cap was hit): leave whitespace alone rather than guess.
+      Left _     -> (0, t)
+      Right toks -> replaceAt nbspOffsets t
+        where
+          nbspOffsets = Set.fromList
+            [ SP.offsetOfSrcPos t range.start
+            | pt <- toks
+            , TSpaces (TSpace txt) <- [computedPayload pt]
+            , range <- SP.nbspHitsInToken uri pt.range.start txt
+            ]
+          replaceAt offs txt =
+            ( Set.size offs
+            , Text.pack [ if i `Set.member` offs then ' ' else ch | (i, ch) <- zip [0 ..] (Text.unpack txt) ]
+            )
+
+execNlgLexer :: SourcePos -> NormalizedUri -> Text -> Either (ParseErrorBundle Text Void) [PosToken]
+execNlgLexer offset uri input = do
+  rtoks <- parse (rawNlgTokens <* eof) (showNormalizedUri uri) input
+  pure (mkPosTokens (Just offset) uri input rtoks)
+
+data TokenState =
+  MkTokenState
+    { posState        :: !(PosState Text)
+    , currentLine     :: Int
+    , currentLineToks :: [PosToken]
+    , prevLineToks    :: [PosToken] -- immediately preceding non-whitespace line
+    }
+  deriving Generic
+
+initialTokenState :: NormalizedUri -> Text -> TokenState
+initialTokenState uri txt =
+  MkTokenState
+    (initialPosState (showNormalizedUri uri) txt)
+    0
+    []
+    []
+
+-- | This traversal postprocesses raw tokens and turns them into pos tokens
+-- by converting their positions.
+--
+-- At the same time, we interpret copy tokens.
+--
+mkPosTokens :: Maybe SourcePos -> NormalizedUri -> Text -> [RawToken] -> [PosToken]
+mkPosTokens sourcePosOffset uri txt rtoks =
+    evalState (traverse go rtoks) tokenSt
+  where
+    startTokenState = initialTokenState uri txt
+    tokenSt = case sourcePosOffset of
+      Nothing -> startTokenState
+      Just offset -> startTokenState
+        { posState = startTokenState.posState
+          { pstateSourcePos = offset
+          }
+        }
+    go :: RawToken -> Base.State TokenState PosToken
+    go rtok = do
+      ts <- get
+      let
+        pst      = ts.posState
+        pstStart = reachOffsetNoLine rtok.start pst
+        pstEnd   = reachOffsetNoLine rtok.end pstStart
+        posStart = convertPos (pstateSourcePos pstStart)
+        posEnd   = convertPos (pstateSourcePos pstEnd  )
+      when (posStart.line /= ts.currentLine) $ do
+        assign #currentLine posStart.line
+        assign #currentLineToks []
+        -- We ignore purely "whitespace" lines, and count comments as whitespace, but currently not annotations.
+        unless (all isSpaceToken ts.currentLineToks) (assign #prevLineToks ts.currentLineToks)
+      assign #posState pstEnd
+      prevLineToks' <- use #prevLineToks
+      let
+        payload  =
+          case rtok.payload of
+            TSymbols (TCopy Nothing) -> TSymbols $ TCopy (findMatchingToken posStart.column prevLineToks')
+            other         -> other
+        pt       =
+          MkPosToken
+            (MkSrcRange
+              posStart
+              posEnd
+              (rtok.end - rtok.start)
+              uri
+            )
+            payload
+      modifying #currentLineToks (pt :)
+      pure pt
+
+findMatchingToken :: Int -> [PosToken] -> Maybe TokenType
+findMatchingToken c pts = do
+  -- trace ("trying to find match: " <> show pts) (pure ())
+  pt <- find (\ pt -> pt.range.start.column == c) pts
+  -- trace ("found match: " <> show (computedPayload pt)) $
+  pure (computedPayload pt)
+
+computedPayload :: PosToken -> TokenType
+computedPayload pt =
+  case pt.payload of
+    RealTCopy original -> original
+    other                 -> other
+
+isSpaceToken :: PosToken -> Bool
+isSpaceToken t =
+  case computedPayload t of
+    TSpaces {} -> True
+    _ -> False
+
+isAnnotationToken :: PosToken -> Bool
+isAnnotationToken t =
+  case computedPayload t of
+    TAnnotations {} -> True
+    _ -> False
+
+-- | Convert from a Megaparsec source position to one of ours.
+convertPos :: SourcePos -> SrcPos
+convertPos (SourcePos _fn l c) =
+  MkSrcPos (unPos l) (unPos c)
+
+unconvertPos :: FilePath -> SrcPos -> SourcePos
+unconvertPos fn (MkSrcPos l c) =
+  SourcePos fn (mkPos l) (mkPos c)
+
+data TokenStream =
+  MkTokenStream
+    { input  :: String
+    , tokens :: [PosToken]
+    }
+  deriving stock Show
+
+proxyTokenStream :: Proxy TokenStream
+proxyTokenStream = Proxy
+
+instance Stream TokenStream where
+  type Token TokenStream = PosToken
+  type Tokens TokenStream = [PosToken]
+
+  tokenToChunk :: Proxy TokenStream -> Token TokenStream -> Tokens TokenStream
+  tokenToChunk Proxy x = [x]
+
+  tokensToChunk :: Proxy TokenStream -> [Token TokenStream] -> Tokens TokenStream
+  tokensToChunk Proxy xs = xs
+
+  chunkToTokens :: Proxy TokenStream -> Tokens TokenStream -> [Token TokenStream]
+  chunkToTokens Proxy xs = xs
+
+  chunkLength :: Proxy TokenStream -> Tokens TokenStream -> Int
+  chunkLength Proxy xs = length xs
+
+  chunkEmpty :: Proxy TokenStream -> Tokens TokenStream -> Bool
+  chunkEmpty Proxy = null
+
+  take1_ :: TokenStream -> Maybe (Token TokenStream, TokenStream)
+  take1_ (MkTokenStream _ [])         = Nothing
+  take1_ (MkTokenStream txt (t : ts)) =
+    Just (t, MkTokenStream (drop (tokensLength proxyTokenStream (t :| [])) txt) ts)
+
+  takeN_ :: Int -> TokenStream -> Maybe (Tokens TokenStream, TokenStream)
+  takeN_ n (MkTokenStream txt ts)
+    | n <= 0 = Just ([], MkTokenStream txt ts)
+    | null ts = Nothing
+    | otherwise =
+      let
+        (ts1, ts2) = splitAt n ts
+      in
+        case nonEmpty ts1 of
+          Nothing -> Just (ts1, MkTokenStream txt ts2)
+          Just nex -> Just (ts1, MkTokenStream (drop (tokensLength proxyTokenStream nex) txt) ts2)
+
+
+  takeWhile_ :: (Token TokenStream -> Bool) -> TokenStream -> (Tokens TokenStream, TokenStream)
+  takeWhile_ p (MkTokenStream txt ts) =
+    let
+      (ts1, ts2) = span p ts
+    in
+      case nonEmpty ts1 of
+        Nothing  -> (ts1, MkTokenStream txt ts2)
+        Just nex -> (ts1, MkTokenStream (drop (tokensLength proxyTokenStream nex) txt) ts2)
+
+instance VisualStream TokenStream where
+  showTokens :: Proxy TokenStream -> NonEmpty (Token TokenStream) -> String
+  showTokens Proxy xs =
+    concat (toList (Text.unpack . displayPosTokenDiag <$> xs))
+
+  tokensLength :: Proxy TokenStream -> NonEmpty (Token TokenStream) -> Int
+  tokensLength Proxy xs = sum ((.range.length) <$> xs)
+
+instance TraversableStream TokenStream where
+  reachOffset :: Int -> PosState TokenStream -> (Maybe String, PosState TokenStream)
+  reachOffset o pst =
+    ( Just (prefix ++ restOfLine)
+    , PosState
+        { pstateInput      = MkTokenStream postTxt post
+        , pstateOffset     = max pst.pstateOffset o
+        , pstateSourcePos  = newSourcePos
+        , pstateTabWidth   = pst.pstateTabWidth
+        , pstateLinePrefix = prefix
+        }
+    )
+    where
+      fn = pst.pstateSourcePos.sourceName
+
+      prefix
+        | sameLine  = pst.pstateLinePrefix ++ preLine
+        | otherwise = preLine
+
+      sameLine :: Bool
+      sameLine = sourceLine newSourcePos == sourceLine pst.pstateSourcePos
+
+      newSourcePos :: SourcePos
+      newSourcePos =
+        case post of
+          [] -> case pst.pstateInput.tokens of
+            [] -> pst.pstateSourcePos
+            xs -> unconvertPos fn (last xs).range.end
+          (x : _) -> unconvertPos fn x.range.start
+
+      pre, post :: [PosToken]
+      (pre, post) = splitAt (o - pst.pstateOffset) pst.pstateInput.tokens
+
+      preTxt, postTxt :: String
+      (preTxt, postTxt) = splitAt tokensConsumed pst.pstateInput.input
+
+      preLine :: String
+      preLine = reverse . takeWhile (/= '\n') . reverse $ preTxt
+
+      tokensConsumed :: Int
+      tokensConsumed =
+        case nonEmpty pre of
+          Nothing    -> 0
+          Just nePre -> tokensLength proxyTokenStream nePre
+
+      restOfLine :: String
+      restOfLine = takeWhile (/= '\n') postTxt
+
+
+-- ----------------------------------------------------------------------------
+-- Parser error messages
+-- ----------------------------------------------------------------------------
+
+data PError
+  = PError
+    { message :: Text
+    , range :: SrcSpan
+    , origin :: Text
+    , fixes :: [LexFix]
+      -- ^ Structured quick fixes for this error, currently only populated by
+      -- 'confusableLexError'. Every other producer of a 'PError' — 'mkPError'
+      -- itself, and every parser-level error in "L4.Parser" that goes
+      -- through it — sets this to @[]@; a diagnostic with no fixes simply
+      -- offers no code action.
+    , code :: Text
+      -- ^ The stable diagnostic code ('parseErrorCode').
+    }
+  deriving (Show, Eq, Ord, Generic)
+  deriving anyclass (NFData)
+  -- ^ 'NFData' (and, via 'Generic', 'Typeable' for free) so a 'PError' can be
+  -- attached to a 'LSP.Core.Types.Diagnostics.FileDiagnostic' as its typed
+  -- source ('LSP.Core.Types.Diagnostics.messageOfL'), the way
+  -- 'L4.TypeCheck.Types.CheckErrorWithContext' already is — that is how
+  -- "LSP.L4.Handlers" recovers a lexer error's structured 'fixes' to build
+  -- its code actions.
+
+-- | One quick fix a lexer 'PError' can carry: a title for the editor's menu
+-- and the (possibly several — see 'pairedQuoteFix') text replacements that
+-- carry it out, each a span in the ORIGINAL source and its replacement text.
+data LexFix
+  = MkLexFix
+    { title :: Text
+    , edits :: [(SrcSpan, Text)]
+    }
+  deriving (Show, Eq, Ord, Generic)
+  deriving anyclass (NFData)
+
+mkPError :: Text -> Text -> (Text, SourcePos, SourcePos) -> PError
+mkPError orig errCode (m, s, e) =
+  PError
+    { message = m
+    , range = MkSrcSpan
+      { start =
+          MkSrcPos
+            { line = unPos $ sourceLine s
+            , column = unPos $ sourceColumn s
+            }
+      , end =
+          MkSrcPos
+            { line = unPos $ sourceLine e
+            , column = unPos $ sourceColumn e
+            }
+      }
+    , origin = orig
+    , fixes = []
+    , code = errCode
+    }
+
+-- | The errors of a bundle, in order, each with its code. The first argument
+-- says where they came from; the second names the kind of a token of the
+-- stream, or 'Nothing' if a token of this stream has no kind that is safe to
+-- put in a code.
+bundleToPErrors ::
+  ( VisualStream s
+  , TraversableStream s
+  , ShowErrorComponent e
+  ) =>
+  Text -> (Token s -> Maybe Text) -> ParseErrorBundle s e -> NonEmpty PError
+bundleToPErrors orig tokenKind bundle =
+  NonEmpty.zipWith
+    (mkPError orig . parseErrorCode tokenKind)
+    (bundleErrors bundle)
+    (errorBundleToErrorMessages bundle)
+
+-- | The stable diagnostic code of a parse error, read from the error itself and
+-- never from its rendered text. See 'L4.TypeCheck.Types.checkErrorCode' for
+-- what a code promises.
+--
+-- A code must not contain anything the user wrote, so that tools can group by
+-- it. An unexpected token contributes its KIND ('tokenKindSlug'). A 'Label' is
+-- free text from a parser, which may quote the source, so it is not used.
+-- Anything else, such as the messages of 'fail', is @parse/syntax-error@.
+parseErrorCode :: (Token s -> Maybe Text) -> ParseError s e -> Text
+parseErrorCode tokenKind = \ case
+  TrivialError _ (Just (Tokens (t :| _))) _ -> maybe syntaxError unexpectedCode (tokenKind t)
+  TrivialError _ (Just EndOfInput) _        -> unexpectedCode endOfInputSlug
+  TrivialError _ (Just (Label _)) _         -> syntaxError
+  TrivialError _ Nothing _                  -> syntaxError
+  FancyError _ fancy
+    | any isIndentationError fancy -> "parse/indentation"
+    | otherwise                    -> syntaxError
+ where
+  syntaxError = "parse/syntax-error"
+  unexpectedCode kind = "parse/unexpected-" <> kind
+  isIndentationError = \ case
+    ErrorIndentation {} -> True
+    _                   -> False
+
+endOfInputSlug :: Text
+endOfInputSlug = "end-of-input"
+
+-- | The kind of a token, for a code such as @parse/unexpected-WITH@. A keyword
+-- is its own kind, spelled as the language spells it. Every other token is
+-- named by a fixed word: an identifier or a literal must never appear as what
+-- the user wrote. Exhaustive on purpose, so that a new token has to be named.
+tokenKindSlug :: TokenType -> Text
+tokenKindSlug tt = case tt of
+  TKeywords _   -> displayTokenType tt
+  TDirectives _ -> "directive"
+  TAnnotations _ -> "annotation"
+  TLiterals lit -> case lit of
+    TIntLit {}      -> "number"
+    TRationalLit {} -> "number"
+    TStringLit {}   -> "string"
+  TSpaces spaces -> case spaces of
+    TSpace {}        -> "whitespace"
+    TLineComment {}  -> "comment"
+    TBlockComment {} -> "comment"
+    TIgnoredAnnotation {} -> "annotation"
+    EOF              -> endOfInputSlug
+  TIdentifiers ident -> case ident of
+    TIdentifier {} -> "identifier"
+    TQuoted {}     -> "identifier"
+    TGenitive      -> "genitive"
+  TSymbols sym -> case sym of
+    TRefOpen         -> "ref-open"
+    TRefClose        -> "ref-close"
+    TNlgOpen         -> "open-bracket"
+    TNlgClose        -> "close-bracket"
+    TParagraph       -> "section-sign"
+    TBullet          -> "bullet"
+    TPOpen           -> "open-paren"
+    TPClose          -> "close-paren"
+    TCOpen           -> "open-brace"
+    TCClose          -> "close-brace"
+    TComma           -> "comma"
+    TSemicolon       -> "semicolon"
+    TDot             -> "dot"
+    TEllipsis        -> "ellipsis"
+    TEllipsisOr      -> "ellipsis-or"
+    TColon           -> "colon"
+    TPercent         -> "percent"
+    TCopy (Just tt') -> tokenKindSlug tt'
+    TCopy Nothing    -> "caret"
+    TOtherSymbolic _ -> "symbol"
+  TOperators op -> case op of
+    TTimes         -> "times"
+    TPlus          -> "plus"
+    TMinus         -> "minus"
+    TGreaterEquals -> "greater-equals"
+    TLessEquals    -> "less-equals"
+    TGreaterThan   -> "greater-than"
+    TLessThan      -> "less-than"
+    TEquals        -> "equals"
+    TEqualsEquals  -> "double-equals"
+    TNotEquals     -> "not-equals"
+    TAnd           -> "and"
+    TOr            -> "or"
+    TImplies       -> "implies"
+    TDividedBy     -> "divided-by"
+
+errorBundleToErrorMessages ::
+  forall s e.
+  ( VisualStream s
+  , TraversableStream s
+  , ShowErrorComponent e
+  ) =>
+  -- | Parse error bundle to display
+  ParseErrorBundle s e ->
+  -- | Textual rendition of the bundle
+  NonEmpty (Text, SourcePos, SourcePos)
+errorBundleToErrorMessages ParseErrorBundle{..} =
+  let
+    (results, _) = runState (traverse format bundleErrors) bundlePosState
+  in
+    results
+ where
+  format :: ParseError s e -> Base.State (PosState s) (Text, SourcePos, SourcePos)
+  format e = do
+    pst <- get
+    let
+      (msline, pst') = calculateOffset pst
+      epos = pstateSourcePos pst'
+      -- Give the error span real width: advance one stream unit (one character
+      -- for the lexer's Text stream, one token for the parser's TokenStream)
+      -- past the error offset. `pst'` is already positioned at `errorOffset e`
+      -- (via `calculateOffset` below), and `reachOffset` never moves backwards,
+      -- so the old literal `1` collapsed to a zero-width span for every error at
+      -- offset >= 1. Residual: an end-of-input error sits at an empty stream,
+      -- where `reachOffset` cannot advance, so those spans stay zero-width.
+      eposNext = pstateSourcePos $ reachOffsetNoLine (errorOffset e + 1) pst'
+      errMsg = parseErrorTextPretty e
+      parseErrCtx = offendingLine msline epos
+    put pst'
+    pure $ (Text.pack $ parseErrCtx <> errMsg, epos, eposNext)
+   where
+    calculateOffset pst = reachOffset (errorOffset e) pst
+    offendingLine msline epos =
+      case msline of
+        Nothing -> ""
+        Just sline ->
+          let
+            rpadding =
+              if pointerLen > 0
+                then replicate rpshift ' '
+                else ""
+            pointerLen =
+              if rpshift + elen > slineLen
+                then slineLen - rpshift + 1
+                else elen
+            pointer = replicate pointerLen '^'
+            lineNumber = (show . unPos . sourceLine) epos
+            padding = replicate (length lineNumber + 1) ' '
+            rpshift = unPos (sourceColumn epos) - 1
+            slineLen = length sline
+          in
+            padding
+              <> "|\n"
+              <> lineNumber
+              <> " | "
+              <> sline
+              <> "\n"
+              <> padding
+              <> "| "
+              <> rpadding
+              <> pointer
+              <> "\n"
+    pxy = Proxy :: Proxy s
+    elen =
+      case e of
+        TrivialError _ Nothing _ -> 1
+        TrivialError _ (Just x) _ -> errorItemLength pxy x
+        FancyError _ xs ->
+          Set.foldl' (\a b -> max a (errorFancyLength b)) 1 xs
+
+-- | Get length of the “pointer” to display under a given 'ErrorItem'.
+errorItemLength :: (VisualStream s) => Proxy s -> ErrorItem (Token s) -> Int
+errorItemLength pxy = \ case
+  Tokens ts -> tokensLength pxy ts
+  _ -> 1
+
+-- | Get length of the “pointer” to display under a given 'ErrorFancy'.
+errorFancyLength :: (ShowErrorComponent e) => ErrorFancy e -> Int
+errorFancyLength = \ case
+  ErrorCustom a -> errorComponentLen a
+  _ -> 1
+
+-- | This isn't truly precise, but it should be mostly fine, because we use
+-- the Haskell escape sequences both in the parser and in printing.
+--
+showStringLit :: Text -> Text
+showStringLit t =
+  Text.pack ((showChar '"' . showLitString (Text.unpack t) . showChar '"') "")
+
+toAnno
+  :: Text
+  -- ^ line herald
+  -> Text
+  -- ^ inline herald opening
+  -> Text
+  -- ^ inline herald closing
+  -> Text
+  -- ^ anno contents
+  -> AnnoType
+  -- ^ inline or line anno
+  -> Text
+toAnno lh oh ch t = \ case
+  InlineAnno -> oh <> t <> ch
+  LineAnno -> lh <> t
+
+
+toRefAnno :: Text -> AnnoType -> Text
+toRefAnno = toAnno "@ref" "<<" ">>"
+
+-- | Re-emit an @\@nlg@ annotation's source text, tag included.
+--
+-- This is on the EXACTPRINT path twice over, so the tag is not cosmetic here:
+-- 'L4.Parser.nlgAnnotationP' rebuilds the annotation with this function and
+-- re-lexes the result, and inner token positions are seeded by advancing over
+-- that text ('mkPosTokens'). Drop the @:he@ and every inner token's column
+-- shifts by three, silently.
+toNlgAnno :: Maybe LangTag -> Text -> AnnoType -> Text
+toNlgAnno mtag t = \ case
+  InlineAnno -> "[" <> t <> "]"
+  LineAnno   -> "@nlg" <> langTagSuffix mtag <> t
+
+langTagSuffix :: Maybe LangTag -> Text
+langTagSuffix = maybe "" (\ (MkLangTag tag) -> ":" <> tag)
+
+displayPosToken :: PosToken -> Text
+displayPosToken (MkPosToken _r tt) =
+  displayTokenType tt
+
+-- | Diagnostic-only rendering of a token: identical to 'displayPosToken'
+-- except that a /resolved/ ditto — @TCopy (Just _)@ — is shown as the caret
+-- the user wrote plus the token it resolved to, e.g.
+-- @^ (resolved to `resides in`)@, so a parse error caused by the copied
+-- token names the real offender instead of blaming the caret. An unresolved
+-- ditto (@TCopy Nothing@) still renders as a bare @^@.
+--
+-- Only megaparsec's error text goes through this (the 'VisualStream'
+-- 'showTokens' instance); everything that reconstructs source text —
+-- exactprint byte-identity, semantic-token splitting, NLG re-rendering —
+-- must keep using 'displayPosToken', where a resolved ditto stays @^@.
+displayPosTokenDiag :: PosToken -> Text
+displayPosTokenDiag (MkPosToken _r (RealTCopy tt)) =
+  "^ (resolved to " <> displayTokenType tt <> ")"
+displayPosTokenDiag pt = displayPosToken pt
+
+-- | "turns around" a map that is expected to
+-- - be surjective
+-- - be injective
+-- - be a function otherwise (i.e. all elements in its
+--   codomain have exactly one image
+--
+-- NOTE: This is really slow for obvious reasons, so it might
+-- be a good target for potential future optimizations
+inverseCompleteLookup :: (Eq a, Show a) => a -> Map c a -> c
+inverseCompleteLookup k
+  = fromMaybe (error $ "inverseCompleteLookup: no inverse image for " <> show k)
+  . lookup k
+  . map (\(a, b) -> (b, a))
+  . Map.toList
+
+displayTokenType :: TokenType -> Text
+displayTokenType = \case
+  TSpaces spcs -> case spcs of
+    TSpace t          -> t
+    TLineComment t    -> t
+    TBlockComment t   -> t
+    TIgnoredAnnotation name rest -> "@" <> name <> rest
+    EOF               -> ""
+  TLiterals lit -> case lit of
+    TIntLit t _i      -> t
+    TRationalLit t _i -> t
+    TStringLit raw _  -> raw
+  TAnnotations ann -> case ann of
+    TNlg mtag t ty    -> toNlgAnno mtag t ty
+    TRef t ty         -> toRefAnno t ty
+    TRefSrc t         -> "@ref-src" <> t
+    TRefMap t         -> "@ref-map" <> t
+    TNlgString t      -> t
+    TNlgPrefix mtag   -> "@nlg" <> langTagSuffix mtag
+    TDesc t           -> "@desc" <> t
+    TExport t         -> "@export" <> t
+    TFixity dir t     -> fixityHerald dir <> t
+    TNonexhaustive t        -> "@nonexhaustive" <> t
+    TNonassertable          -> "@nonassertable"
+    TEndsBecause t          -> "@ends-because" <> t
+    TLang _ raw       -> "@lang" <> raw
+  TIdentifiers i -> case i of
+    TGenitive         -> "'s"
+    TIdentifier t     -> t
+    TQuoted t         -> "`" <> t <> "`"
+  TDirectives dir -> case dir of
+    TDirectiveContinue -> "#"  -- continuation marker is just "#"
+    _ -> "#" <> inverseCompleteLookup dir directives
+  TKeywords kws -> inverseCompleteLookup kws keywords
+  -- A resolved ditto, TCopy (Just _), deliberately prints as the "^" the
+  -- user wrote: this function renders concrete syntax, and exactprint
+  -- byte-identity ('L4.ExactPrint.exactprint' concatenates
+  -- 'displayPosToken'), semantic-token splitting, and NLG re-rendering all
+  -- depend on that. It also cannot go through 'inverseCompleteLookup' —
+  -- only @TCopy Nothing@ is a key in 'symbols', so the lookup would error.
+  -- Parser diagnostics name the resolved token via 'displayPosTokenDiag'
+  -- in the 'VisualStream' 'showTokens' instance instead.
+  RealTCopy _ -> displayTokenType (TSymbols (TCopy Nothing))
+  -- `TOtherSymbolic` carries the verbatim source run of an unrecognized
+  -- operator; render it as-is rather than looking it up (it is not a key in
+  -- `symbols`, so the lookup below would otherwise hit a partial-function
+  -- `error`). This branch is currently unreachable — the producer at the
+  -- `TOtherSymbolic` lexer rule is shadowed by `operatorsPayload`'s
+  -- consumed-failure — but keeping `displayTokenType` total removes the
+  -- landmine if that ever changes.
+  TSymbols (TOtherSymbolic t) -> t
+  TSymbols sym -> inverseCompleteLookup sym symbols
+  TOperators op -> inverseCompleteLookup op operators
+
+data TokenCategory
+  = CIdentifier
+  | CStringLit
+  | CNumberLit
+  | CSymbol
+  | COperator
+  | CKeyword
+  | CComment
+  | CWhitespace
+  | CDirective
+  | CAnnotation
+  | CEOF
+  deriving stock Eq
+
+posTokenCategory :: TokenType -> TokenCategory
+posTokenCategory = \ case
+  TSpaces EOF -> CEOF
+  TSpaces TLineComment {} -> CComment
+  TSpaces TBlockComment {} -> CComment
+  -- Ignored, as a comment is: an editor that greys it out says what the
+  -- warning says.
+  TSpaces TIgnoredAnnotation {} -> CComment
+  TSpaces TSpace {} -> CWhitespace
+  TLiterals TStringLit {} -> CStringLit
+  TLiterals TIntLit {} -> CNumberLit
+  TLiterals TRationalLit {} -> CNumberLit
+  TOperators {} -> COperator
+  TDirectives {} -> CDirective
+  TKeywords {} -> CKeyword
+  TAnnotations {} -> CAnnotation
+  RealTCopy tt -> posTokenCategory tt
+  TSymbols {} -> CSymbol
+  TIdentifiers {} -> CIdentifier
+
+showNormalizedUri :: NormalizedUri -> String
+showNormalizedUri =  Text.unpack . (.getUri) . fromNormalizedUri
+
+-- | A TCopy that carries a copied token
+pattern RealTCopy :: TokenType -> TokenType
+pattern RealTCopy tt = TSymbols (TCopy (Just tt))

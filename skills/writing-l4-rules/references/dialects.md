@@ -34,16 +34,16 @@ A brief that says the target is `main` means this build or a later one, and this
 - **The probes.**
   `references/dialect-probes/` holds 105 small files, each the whole of one test, named by what they show:
 
-  - a number, `01` to `58`: `unstable` accepts it and `main` rejects it;
+  - a number, `01` to `58`: `unstable` accepts it and `main` build 98 rejects it (but see "Build 98 to build 112": seven of them now pass on `main`);
   - `alt-`: the spelling to write on `main` instead, which passes on both;
   - `same-`: reads the same on both (where there are assertions, their counts match);
-  - `degrades-`: passes `l4 check` on both and means something else, or less, on `main`;
+  - `degrades-`: passes `l4 check` on both and means something else, or less, on `main` (but see "Build 98 to build 112": one of them now reads on `main`);
   - `run-`: passes `l4 check` on both and is read with `l4 run`;
   - `main-`: `main` accepts it and the measured `unstable` build rejects it (but see "Since measured" under "Build 97 to build 98");
   - `unstable-`: `unstable` rejects it and `main` accepts it.
 
-  `main` rejects exactly the 58 numbered files.
-  The shelf build rejects exactly nine: the three `main-*` files, the five `unstable-refuses-*` files and `unstable-reads-field-for-constructor`.
+  `main` build 98 rejects exactly the 58 numbered files (but see "Build 98 to build 112").
+  The shelf build rejects exactly nine: the three `main-*` files, the five `unstable-refuses-*` files and `unstable-reads-field-for-constructor` (but see "Build 98 to build 112" for a later shelf build).
   The probes are deliberately odd `.l4`, so a repo-wide checker can object to one: `etc/check-not-precedence.mjs` does to `unstable-refuses-not-and`, which therefore carries the `NOT-REACH-OK` marker that checker honours.
 
 To refresh this page, run both binaries over both sets from the root of an l4-ide checkout, and compare with the numbers above:
@@ -55,6 +55,7 @@ etc/dialect-census.sh <main l4> skills/writing-l4-rules/references/dialect-probe
 etc/dialect-census.sh <unstable l4> skills/writing-l4-rules/references/dialect-probes
 ```
 
+The script runs each binary with `JL4_LIBRARY_PATH` unset and `XDG_DATA_HOME` pointing at an empty folder that it makes and removes, so that a library in the user's data folder cannot change the answer.
 The script prints one line per failing file, with the first error, and a summary count.
 `encoding-a-subject/assets/fetch-main-l4.sh` prints the path of a main build, fetching it if need be.
 Quote the `--version` line of each binary you ran, as above.
@@ -77,6 +78,61 @@ To tell which you have, run `main-isinteger.l4` and `main-waituntil.l4` with it:
 This skill's examples use the new names, so with an older shelf build, write the old spellings or the portable idioms in the table below.
 Probes 54 and 55 keep the old spellings on purpose.
 
+### Build 98 to build 112
+
+**Since measured (2026-11-27), with `1.6.112 (main, e4f4bf3, 2026-11-18)` and the shelf build `unstable-20261126-1be4053 (unstable, 1be4053, 2026-11-26)`:** `main` passes `l4 check` on seven of the 58 numbered probes: 01 (`@lang`), 02 to 05 (`REFUSE`, `#ASSERT REFUSED`, `BECAUSE`, `YMD`), 44 (a `\[` in an inline annotation) and 53 (`YMD` in a comparison).
+Both builds ran with `XDG_DATA_HOME` pointing at an empty folder and `JL4_LIBRARY_PATH` unset, so that a library in the user's data folder could not change the answer.
+`etc/dialect-census.sh` over `references/dialect-probes` printed `census: 105 files, 51 fail (1.6.112 (main, e4f4bf3, 2026-11-18))` for `main` and `census: 105 files, 7 fail (unstable-20261126-1be4053 (unstable, 1be4053, 2026-11-26))` for the shelf build.
+Build 98, run the same way, printed `census: 105 files, 58 fail (1.6.98 (main, 7689b0d, 2026-10-19))`, so the counts above are right for build 98.
+Its census lines differ from those of build 112 in the seven probes that now pass and in the wording of one first error (probe 11, below).
+Of the `main` builds run (98, 99, 102, 108, 109 and 112), 99, 102 and 108 pass probes 01 and 44, and 109 and 112 pass all seven.
+Builds 100, 101, 103 to 107, 110 and 111 were not run.
+By source, `git grep` at the `l4-ide-build-N` tags of the `l4-ide` repository finds `REFUSE` absent from `jl4-core/src` at builds 98, 99, 100, 102, 104, 107 and 108, and present at 109, 110 and 112.
+By source, it finds `YMD` absent from `jl4-core/libraries/daydate.l4` at those tags before 109 and present at 109, 110 and 112, and `@lang` in `jl4-core/src/L4/Lexer.hs` at builds 99, 100, 102, 104, 107, 108, 109, 110 and 112, but not at 98.
+Builds 101, 103, 105, 106 and 111 were not among the tags available, so neither a run nor a source check covers them.
+`git grep` finds `REFUSE` and `YMD` in `jl4-core/src` and in `jl4-core/libraries` at `e4f4bf3`, and `@lang` in `jl4-core/src` there; it finds none of the three in either directory at `7689b0d`, the commit of build 98.
+
+A pass is not a reading.
+`l4 check` passing says `main` no longer stops at the text; it does not say `main` means what `unstable` means.
+Probes 03, 04, 05 and 53 were also run with `l4 run` on `main` 1.6.112 and on the shelf build, and the two print the same diagnostics: 03 reports `eval/assertion-failed` and 04 `eval/assertion-passed` on both, and 05 and 53 print `Checking succeeded.` on both.
+The exit status of 03 differs (re-run 2026-11-28): 0 on `main` 1.6.109 and 1.6.112, and 1 on a `dev` build, whose output for 03, 04, 05 and 53 is byte for byte that of 1.6.112; probes 04, 05 and 53 exit 0 on all three.
+Probes 01, 02 and 44 were compared by `l4 check` alone.
+
+The `degrades-` probe `degrades-nlg-language-tag` is the one that `main` has since fixed.
+It was run on the same six `main` builds (98, 99, 102, 108, 109 and 112), measured 2026-11-28, with `XDG_DATA_HOME` pointing at an empty folder and `JL4_LIBRARY_PATH` unset.
+`l4 check` passes it on all six, so the census counts above do not move.
+On build 98, `l4 ast` shows `TNlgString ":pt"`, as the row says, and `l4` has no `nlg` command.
+On builds 99, 102, 108, 109 and 112, `l4 ast` shows `MkLangTag "pt"` instead, and `l4 nlg --lang pt` prints `o valor 200 excede o limite`, on the probe with ``#EVAL `is large` 200`` added at the end, because the shipped probe has no directive for `l4 nlg` to print.
+Those five builds also warn that `@nlg:pt` is the rule's only wording and that nothing makes `pt` a language: with no code on 99 and 102, and with the code `lint/lone-lang-tag` on 108, 109 and 112.
+A rule with `@nlg:en` and `@nlg:pt` wordings, run on builds 99 and 112 only, prints the wording that `--lang en` or `--lang pt` asks for.
+So the first build run that reads a language tag is 99, the build after 98, and of the builds run the row's "degrades" is true of build 98 only.
+
+Of the 51 numbered probes `main` 1.6.112 still rejects, 50 give the same first error as on build 98; probe 11 now says `The first argument of TIMES is expected to be of type NUMBER but is here of type …`.
+This page's minimum for a `main` target is still build 98, so the "write instead" spellings of the seven rows stay the portable ones; the four that name a probe (`alt-maybe-nothing`, `alt-date`, `alt-date-compared`, `alt-inline-bracket`) pass `l4 check` on build 98, on build 112 and on the shelf build.
+`check.sh` compares with the newest `main` build by default, and that build reads the seven constructs, so it no longer goes red on them.
+To hold a module to this page's minimum, run it with `L4_MAIN_BUILD=98` and no `L4_MAIN`.
+Measured 2026-11-28 with the module below, `check.sh` with target `main`, and a `dev` build as `l4`; the module was the only `.l4` file in its directory:
+
+```l4
+GIVEN n IS A NUMBER
+GIVETH A NUMBER
+`rate for` MEANS
+  IF n EQUALS 1 THEN 10
+  ELSE REFUSE "no rate for this n"
+
+#ASSERT `rate for` 1 EQUALS 10
+#ASSERT REFUSED `rate for` 2
+```
+
+The module is red with `L4_MAIN` set to build 98 or 108 (exit 1, `reads differently on main`), and green with 109 or 112 (exit 0).
+With `L4_MAIN_BUILD=98` and no `L4_MAIN` the module is red, and it ran from the cache with no download: the run had a proxy set that refuses every connection, and `fetch-main-l4.sh` printed no `fetching` line.
+With neither variable and the same dead proxy `check.sh` fell back to the newest cached build, 112, and the module was green.
+The "`main` build 98" columns are as measured on build 98, and each of the seven rows points here.
+The 42 pages under "The documented pages, by cause" were counted on build 98 and were not counted again; on the tree at `a61da005e` (123 `.l4` files under `doc/`), `etc/dialect-census.sh` found 37 failing on `main` 1.6.112 and none on the shelf build.
+
+The shelf build rejects 7 of the 105 files: `main-infix-exponent` and the six `unstable-` files.
+It reads `main-isinteger` and `main-waituntil`, as "Since measured (2026-11-21)" above says a build cut after that change would.
+
 ## Status on `main`
 
 Each row gives one of three words for what `main` does with the construct.
@@ -93,12 +149,13 @@ Each row gives one of three words for what `main` does with the construct.
 2. Before you call a module done, run `check.sh` in the encoding directory.
    The target is `main` unless you set `L4_TARGET=unstable`.
    It fetches the newest main build with `fetch-main-l4.sh` (cached), runs every module with both binaries, and compares the four counts.
+   The newest build reads the seven constructs of "Build 98 to build 112", so to hold the module to this page's minimum, run it with `L4_MAIN_BUILD=98` as well, and no `L4_MAIN`.
    A line that says `reads differently on main` is a module `main` cannot read as it stands, because its counts differ or because `main` did not finish it in `L4_MAIN_TIMEOUT` seconds (300 unless set).
    Exit status 2 means the main step could not run (no main build for this platform, no network, no `fetch-main-l4.sh` beside `check.sh`), and then the check is not done.
 3. Know what the check cannot see.
    It does not see a different `#TRACE` outcome.
    Only an error, or an `#ASSERT` that comes out differently, moves a count.
-   Three rows differ in what they do, and the check passes all three: an input named in an action, a `MAY` with a `LEST`, and a language tag on `@nlg`.
+   Three rows differ in what they do, and the check passes all three: an input named in an action, a `MAY` with a `LEST`, and, of the builds run, only on build 98, a language tag on `@nlg`.
    Use the spelling the table gives, and compare the two builds' output for every trace yourself: run each file with both builds and read the outcomes.
 4. A few constructs have no spelling both compilers read: anything the table says to leave out, and `WAITUNTIL` or `ISINTEGER` where no portable idiom fits (the table gives one for each common use).
    A module that needs one cannot be written with the shelf build.
@@ -118,7 +175,7 @@ In the first, fourth and sixth, `main` answers differently; in the second, third
 | An input named in an action: `GIVEN creditor …` then `MUST Pay Borrower creditor 10` (`run-must-names-an-input`) | Compares the payload with the input: paying the wrong party leaves the obligation open. | **degrades**: `creditor` is a fresh name that matches any payload: paying a stranger **fulfils** the obligation. | `MUST Pay Borrower payee 10 PROVIDED payee EQUALS creditor` (`run-must-guard-instead`). Same traces, same verdicts for `MUST`, `MAY` and `SHANT`; only the layout of the residual obligation differs. `main`'s own spelling is `EXACTLY`, which `unstable` warns is being retired, and which failed on `main` for a multi-field action (`run-exactly-with-an-input`, `Internal error: creditor is not in scope`). |
 | `NOT a AND b` or `NOT a OR b` on one line, with no brackets (`unstable-refuses-not-and`, `unstable-refuses-not-or`) | An error: it reads as `NOT (a AND b)` and asks you to write the brackets. | **reads**: accepted, and read as `NOT (a AND b)`, or `NOT (a OR b)`: `NOT TRUE AND FALSE` is `TRUE`. | Bracket it: `(NOT a) AND b`, or `NOT (a AND b)` (`alt-not-and-bracketed`). Or put `NOT a` and the connective on separate lines at the same indent, which both read the same (`same-not-on-two-lines`). Here `unstable` is the stricter compiler. |
 | A party that is not the action's performer, which is the action's first actor-typed field. An obligation: `PARTY Drinker MUST eat` where `eat` is `Action OF Eater, "eat"`, a record (`unstable-refuses-wrong-performer`). An event in a `#TRACE`: `PARTY Drinker DOES eat` (`unstable-refuses-wrong-performer-event`), or `PARTY Lender DOES Pay Borrower Lender 10` for a constructor `Pay HAS payer, to, amount` (`unstable-refuses-wrong-performer-event-ctor`) | An error: `An actor may only perform its own actions.` For a constructor action it checks events only: the obligation `PARTY Lender MUST Pay Borrower Lender 10` is clean on both (`same-constructor-obligation-unchecked`). | **reads**: accepted, with no warning. In a trace the stranger's event is passed over and the obligation stays open. | Name the performer in the action and make the `PARTY` match it: `PARTY Eater MUST eat`. `main` will not catch a mismatch, so check it by eye. Here too `unstable` is the stricter compiler, for records and for the events of constructors, and not for the obligation of a constructor. |
-| A language tag on an `@nlg` herald: `@nlg:pt o valor %amount% excede o limite` (`degrades-nlg-language-tag`) | The herald is tagged `pt`, so a rule can carry renderings in several languages. | **degrades**: read as an untagged `@nlg` whose text begins `:pt` (`l4 ast` shows `TNlgString ":pt"`). | Write the herald without a tag; `main` has no per-language heralds. |
+| A language tag on an `@nlg` herald: `@nlg:pt o valor %amount% excede o limite` (`degrades-nlg-language-tag`) | The herald is tagged `pt`, so a rule can carry renderings in several languages. | **degrades**: read as an untagged `@nlg` whose text begins `:pt` (`l4 ast` shows `TNlgString ":pt"`). | Write the herald without a tag: build 98 has no per-language heralds. The builds run from 99 on do ("Build 98 to build 112"). |
 | A constructor named like a field of a record input: `b's kind EQUALS Alpha`, where `b` has a field `Alpha` too (`unstable-reads-field-for-constructor`) | The field wins, because the fields of an input are in scope by name (field opening): a warning says so, and the comparison then fails to type-check. | **reads**: the constructor, as written. | Give the constructor and the field different names. `check.sh` goes red on this, and it is `unstable` that misreads it. |
 | A `MAY` with an explicit `LEST`: `MAY Pay Borrower Lender 10 WITHIN 5 HENCE FULFILLED LEST BREACH`, when nothing is done in time (`run-may-lest-lapse`) | The permission lapses into the `LEST`: `DEONTIC BREACHED`. | **degrades**: `main` ignores a `LEST` after `MAY`, as its own skill says, and the lapse is `FULFILLED`. | If inaction should be a breach, make it a `MUST`: a lapsed `MUST` is a breach on both. If it should have no consequence, leave the `LEST` off: a lapsed `MAY` without one is `FULFILLED` on both. |
 | An infix `EXPONENT` in a module with any `IMPORT`: `IMPORT prelude` then `#EVAL 2 EXPONENT 10` (`main-infix-exponent`) | An error: `unexpected EXPONENT`, after `IMPORT prelude`, `IMPORT daydate`, `IMPORT math` or `IMPORT currency` alike. The same line in a module with no `IMPORT` is accepted. | **reads**: `1024`, with or without an import. | The prefix form, `EXPONENT 2 10`, which both read the same (`alt-exponent-prefix`). |
@@ -139,7 +196,7 @@ Read the row before you read the message.
 | `BOOLEAN TYPICALLY TRUE` on a field (15) | Accepted. | **rejects**: `The arities of the types do not match. I expected 0 arguments, but I found 2.` | Leave the default out; see `TYPICALLY` below. |
 | `DECLARE Applicant` with no body (17) | Accepted: an opaque type. | **rejects**: `unexpected GIVEN`, at the next declaration. | Give the type one field (`alt-record-not-opaque`). |
 | `RULES EFFECTIVE DATE AT LEAST d` (36) | Accepted. | **rejects**: ``There are multiple definitions for the identifier `__GEQ__` `` | Take the date as a `GIVEN` input of the rule (`alt-rule-date-as-input`). |
-| A date made with `YMD` and compared: `d AT LEAST YMD 2025 7 1` (53) | Accepted. | **rejects**: ``There are multiple definitions for the identifier `__GEQ__` `` | `d AT LEAST (Date 1 7 2025)`, day first (`alt-date-compared`). Alone, the same `YMD` fails plainly: see "Loud and plain" below. |
+| A date made with `YMD` and compared: `d AT LEAST YMD 2025 7 1` (53) | Accepted. | **rejects**: ``There are multiple definitions for the identifier `__GEQ__` ``. Passes `l4 check` on `main` 1.6.112: see "Build 98 to build 112". | `d AT LEAST (Date 1 7 2025)`, day first (`alt-date-compared`). Alone, the same `YMD` fails plainly: see "Loud and plain" below. |
 | `AFTER 3 WITHIN 30`, `AFTER 3 BEFORE d` (32, 33) | Accepted: the edges of the window. | **rejects**: `You are trying to apply order … (which is not a function)`; `The function pay … expects 1 argument`. | Nothing: `main` reads `AFTER 3` as more arguments of the action. |
 | `BREACH BY LIST a, b` (34) | Accepted. | **rejects**: `The HENCE clause of a regulative rule is expected to be of type DEONTIC OF …` | `BREACH BY` one party, or `BREACH BECAUSE "…"` (`alt-breach-by-one-party`, `alt-breach-because`). |
 | A rule applied inside `MUST (…)`: ``MUST (`payment by` Alice 1500)`` (42) | Accepted. | **rejects**: ``I could not find a definition for the identifier `payment by` `` | Write the constructor: `MUST Pay Alice 1500` (`alt-must-a-constructor`). |
@@ -170,12 +227,12 @@ What `main` says depends on what follows the `GIVEN`:
 <!-- prettier-ignore -->
 | Spelling | `unstable` | `main` build 98 | On `main`, write instead |
 | --- | --- | --- | --- |
-| `@lang pt` as the first line of a module (01) | Accepted. | **rejects**: `unexpected '@'` | Nothing: leave it out. `main` has no module language declaration. |
-| An `@infixl`, `@infixr`, `@infix`, `@nonassertable` or `@nonexhaustive` line, or any `@word` `main` does not know (45 to 48) | Known, or a warning that the annotation is unknown and is ignored. | **rejects**: `unexpected '@'` | Drop the line, and bracket operator chains by hand. `@export`, `@desc`, `@nlg`, `@ref`, `@ref-map` and `@ref-src` are fine (`alt-annotations-main-knows`). |
-| `REFUSE "reason"` (02) | Accepted. | **rejects**: `I could not find a definition for the identifier REFUSE` | Return a `MAYBE`, with `NOTHING` for "this case is not covered" (`alt-maybe-nothing`). The rule's result type changes. |
-| `#ASSERT REFUSED e` (03) | Accepted. | **rejects**: `I could not find a definition for the identifier REFUSED` | On the `MAYBE` spelling, `#ASSERT e EQUALS NOTHING` (`alt-maybe-nothing`). |
-| `#ASSERT REFUSED e BECAUSE "reason"` (04) | Accepted. | **rejects**: `unexpected BECAUSE` | Nothing: a `MAYBE` carries no reason. Put the reason in a comment. |
-| `YMD 2026 10 19` (05) | Accepted; refuses an out-of-range month or day. | **rejects**: `I could not find a definition for the identifier YMD` | `Date 19 10 2026`, day first (`alt-date`). `Date` rolls an out-of-range day over instead of refusing, on both compilers: `Date 29 2 2023` is `Date 1 3 2023` (`alt-date-rolls-over`, read with `l4 run`). Compared with a date, `YMD` fails differently: see above. |
+| `@lang pt` as the first line of a module (01) | Accepted. | **rejects**: `unexpected '@'`. Passes `l4 check` on `main` 1.6.112: see "Build 98 to build 112". | Nothing: leave it out. `main` build 98 has no module language declaration. |
+| An `@infixl`, `@infixr`, `@infix`, `@nonassertable`, `@nonexhaustive` or `@ends-because` line, or any `@word` `main` does not know (45 to 48; `@ends-because` has no probe of its own, and is a word `main` does not know) | Known, or a warning that the annotation is unknown and is ignored. | **rejects**: `unexpected '@'` | Drop the line, and bracket operator chains by hand. `@export`, `@desc`, `@nlg`, `@ref`, `@ref-map` and `@ref-src` are fine (`alt-annotations-main-knows`). |
+| `REFUSE "reason"` (02) | Accepted. | **rejects**: `I could not find a definition for the identifier REFUSE`. Passes `l4 check` on `main` 1.6.112: see "Build 98 to build 112". | Return a `MAYBE`, with `NOTHING` for "this case is not covered" (`alt-maybe-nothing`). The rule's result type changes. |
+| `#ASSERT REFUSED e` (03) | Accepted. | **rejects**: `I could not find a definition for the identifier REFUSED`. Passes `l4 check` on `main` 1.6.112: see "Build 98 to build 112". | On the `MAYBE` spelling, `#ASSERT e EQUALS NOTHING` (`alt-maybe-nothing`). |
+| `#ASSERT REFUSED e BECAUSE "reason"` (04) | Accepted. | **rejects**: `unexpected BECAUSE`. Passes `l4 check` on `main` 1.6.112: see "Build 98 to build 112". | Nothing: a `MAYBE` carries no reason. Put the reason in a comment. |
+| `YMD 2026 10 19` (05) | Accepted; refuses an out-of-range month or day. | **rejects**: `I could not find a definition for the identifier YMD`. Passes `l4 check` on `main` 1.6.112: see "Build 98 to build 112". | `Date 19 10 2026`, day first (`alt-date`). `Date` rolls an out-of-range day over instead of refusing, on both compilers: `Date 29 2 2023` is `Date 1 3 2023` (`alt-date-rolls-over`, read with `l4 run`). Compared with a date, `YMD` fails differently: see above. |
 | `TYPICALLY 2` or `TYPICALLY "Singapore"` on a field; `TYPICALLY 18` on a `GIVEN` (13, 14, 16) | Accepted: the default for a case that leaves the fact out. | **rejects**: `unexpected 2`, `unexpected "Singapore"`, `unexpected 18` | Leave it out (`alt-no-typically`). `main` has no defaults: put the presumed value in the `@desc`, and have the caller supply every fact. |
 | Sets: `SET OF`, `setFromList`, `setSize`, `` `is in` ``, `UNION` (18 to 22) | In the prelude, with `emptySet`, `setToList`, `is subset of`, `set equals`, `INTERSECT`, `LESS`, `WITHOUT` | **rejects**: `I could not find a definition for the identifier`, for each name | A `LIST OF` and `elem` (`alt-list-elem`). Five names have probes here; the rest are in the same block of the unstable prelude, and a second reader's probes of them found each missing on `main` too. |
 | `IMPORT hierarchy`, ``IMPORT `negation-as-failure` `` (49, 50) | In the binary. | **rejects**: `I could not find a module with this name` | Nothing. The other 20 libraries under `jl4-core/libraries/` import on both compilers. |
@@ -188,7 +245,7 @@ What `main` says depends on what follows the `GIVEN`:
 | `` `IS INTEGER` `` (54) | Accepted. | **rejects**: ``I could not find a definition for the identifier `IS INTEGER` ``: build 98 spells it `ISINTEGER`, with no alias. | `FLOOR x EQUALS x`, which agrees on both for whole numbers, fractions, negatives and zero (`alt-is-integer-by-floor`). `ISINTEGER` is main's spelling (`main-isinteger`), and the measured shelf build rejects it (but see "Since measured" under "Build 97 to build 98"). |
 | ``(`WAIT UNTIL` 8)`` in a `#TRACE` (55) | Accepted. It was the house form in the skills until 2026-11-21, when they moved to `WAITUNTIL`. | **rejects**: ``I could not find a definition for the identifier `WAIT UNTIL` ``: build 98 spells it `WAITUNTIL`, with no alias. | An event at that time by a party the rule does not constrain, such as `PARTY Seller DOES pay AT 8`: the clock moves the same way on both (`alt-wait-by-an-event-of-another-party`). It needs an action that party can perform; where there is none, `WAITUNTIL 8` is main's spelling (`main-waituntil`), and the measured shelf build rejects it (but see "Since measured" under "Build 97 to build 98"). |
 | `MUST DO pay` (56) | Accepted. | **rejects**: `unexpected DO`: from build 98 `DO` is a modal of its own. | Drop the `DO`: `MUST pay`. |
-| A `\[` or `\]` inside an inline `[…]` annotation (44) | Accepted: a literal bracket. | **rejects**: `unexpected %`, because the annotation ended at the first `]` | Put no bracket inside an inline annotation (`alt-inline-bracket`). |
+| A `\[` or `\]` inside an inline `[…]` annotation (44) | Accepted: a literal bracket. | **rejects**: `unexpected %`, because the annotation ended at the first `]`. Passes `l4 check` on `main` 1.6.112: see "Build 98 to build 112". | Put no bracket inside an inline annotation (`alt-inline-bracket`). |
 | A field read in an action's argument: `MAY Take Official (c's measure)` (51) | Accepted. | **rejects**: `unexpected 's` | `MAY Take Official m PROVIDED m EQUALS c's measure` (`run-field-in-guard`). |
 
 ## Reads the same
@@ -206,7 +263,7 @@ These **read**: the same four counts on both compilers, where a probe has assert
 
 ## The documented pages, by cause
 
-The 42 pages under `doc/` that `main` rejects, with the row that explains the first error on each.
+The 42 pages under `doc/` that `main` rejects (on build 98; see "Build 98 to build 112"), with the row that explains the first error on each.
 A parse error hides any type error after it, so a page can carry a second cause behind the first.
 Two kinds of evidence are used.
 "Rewritten" means a scratch copy of the page, with each section `GIVEN` turned into module-level `ASSUME` lines, passes `l4 check` on `main`, so the section `GIVEN` is the whole cause.

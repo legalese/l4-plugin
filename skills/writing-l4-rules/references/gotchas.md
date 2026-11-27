@@ -26,6 +26,7 @@ Things that will trip up a general-purpose large language model because they are
 - [`@export` placement](#export-placement)
 - [Annotation fence](#annotation-fence)
 - [A library's own example definitions are visible to importers](#a-librarys-own-example-definitions-are-visible-to-importers)
+- [`@nlg` placement and language](#nlg-placement-and-language)
 - [NLG and reference annotations](#nlg-and-reference-annotations)
 - [`EVERY … WHO elem` is deprecated and nothing tells you](#every--who-elem-is-deprecated-and-nothing-tells-you)
 - [Four errors that do not point at the fix](#four-errors-that-do-not-point-at-the-fix)
@@ -268,7 +269,7 @@ L4 never silently converts between types. `"42" + 1` is a type error. Use the ex
 
 ## The `daydate` month-subtraction footgun
 
-After `IMPORT daydate`, you build calendar dates with `YMD year month day` (recommended for new code, BOUNDS-CHECKED) or the little-endian `Date day month year` (lenient). **This footgun is `Date`-specific**: `YMD` refuses an out-of-range month instead of clamping — `YMD 2025 (3 MINUS 6) 1` stops on `` `YMD refused an out-of-range month or day` `` where `Date 1 (3 MINUS 6) 2025` silently clamps to January 2025. Use `Date` when you _want_ rolling month arithmetic; use `YMD` for literals.
+After `IMPORT daydate`, you build calendar dates with `YMD year month day` (recommended for new code, BOUNDS-CHECKED) or the little-endian `Date day month year` (lenient). **This footgun is `Date`-specific**: `YMD` refuses an out-of-range month instead of clamping — `YMD 2025 (3 MINUS 6) 1` stops on `` `YMD refused an out-of-range month or day` `` (the `dev` build's reason, measured 2026-11-28: `main` builds 109 and 112 say `YMD: the month is not a whole number from 1 to 12`, and `main` build 98 has no `YMD`) where `Date 1 (3 MINUS 6) 2025` silently clamps to January 2025. Use `Date` when you _want_ rolling month arithmetic; use `YMD` for literals.
 
 The constructor does **not** normalise a non-positive month by rolling back a year — it **clamps a month `≤ 0` to January of the same year**. So `Date 1 (3 MINUS 6) 2025` is **January 2025**, _not_ September 2024. Month **overflow** past 12, by contrast, _does_ roll forward correctly: `month PLUS 6` on a December date lands in the next year.
 
@@ -338,15 +339,23 @@ Both introduce local bindings. Pick by position:
 - **`LET … IN`** — leading. Use for a single binding consumed immediately.
 
 ```l4
--- WHERE: trailing helpers
-circleArea radius IS pi TIMES radius TIMES radius
-WHERE
-    pi MEANS 3.14159
+-- WHERE: trailing helpers, indented under the body
+GIVEN radius IS A NUMBER
+GIVETH A NUMBER
+`circle area` radius MEANS
+    pi TIMES radius TIMES radius
+    WHERE
+        pi MEANS 3.14159
 
 -- LET ... IN: inline
-LET taxRate MEANS 0.08 IN
-    price TIMES (1 PLUS taxRate)
+GIVEN price IS A NUMBER
+GIVETH A NUMBER
+`price with tax` price MEANS
+    LET `tax rate` MEANS 0.08 IN
+        price TIMES (1 PLUS `tax rate`)
 ```
+
+`WHERE` must be indented under the body it belongs to; at column 1 it is a parse error (`unexpected WHERE`).
 
 ---
 
@@ -372,19 +381,18 @@ squared x MEANS x TIMES x
 
 ## Annotation fence
 
-All annotations begin with `@`.
-On its own line, an annotation applies to the **following** definition; trailing a line, it applies to what is on that line.
-`@nlg` follows that rule with two twists — a rule takes it only on the line above, and inside a field list or a `GIVEN` list an own-line annotation describes the field or input **above** it — which the next section measures.
-Read it before writing one:
+All annotations begin with `@`. `@export`, `@ref` and `@desc` apply to the definition they sit with or precede; `@nlg` is described under its own heading below.
 
-| Annotation | Purpose                                                            |
-| ---------- | ------------------------------------------------------------------ |
-| `@desc`    | Human-readable description (internal unless paired with `@export`) |
-| `@export`  | Mark function for deployment via `jl4-service`                     |
-| `@nlg`     | Natural-language-generation hint (for rendering the rule as prose) |
-| `@ref`     | Cross-reference to a legal source                                  |
-| `@ref-src` | Accepted and ignored (the CSV loading it did was removed)          |
-| `@ref-map` | Mapping table for references                                       |
+| Annotation      | Purpose                                                                                                          |
+| --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `@desc`         | Human-readable description (internal unless paired with `@export`)                                               |
+| `@export`       | Mark function for deployment via `jl4-service`                                                                   |
+| `@nlg`          | The wording `l4 nlg` and `l4 render` print; see below                                                            |
+| `@lang`         | The language an untagged `@nlg` in the module is written in                                                      |
+| `@ref`          | Cross-reference to a legal source                                                                                |
+| `@ref-src`      | Accepted and ignored (the CSV loading it did was removed)                                                        |
+| `@ref-map`      | Mapping table for references                                                                                     |
+| `@ends-because` | Why a rule whose `HENCE` or `LEST` leads back to itself ends ([regulative](regulative.md#recursive-obligations)) |
 
 `@ref` and `@ref-map` are the "link this rule to §3.2 of the statute" annotations — use them whenever the source document has stable citations.
 An `@ref` on its own line binds to the next syntax node, whatever it is, so it goes above the rule it cites.
@@ -398,7 +406,7 @@ The lexer still reads it and the parser stores nothing from it (`refAdditionalP`
 Measured: `@ref-src this-file-does-not-exist.csv` passes `l4 check` with `Check succeeded` and no diagnostic.
 To tie an `@ref` to lines of a raw source text with `src:` locators that a script can check, see [source-locators.md](../../encoding-a-subject/references/source-locators.md) in the `encoding-a-subject` skill.
 
-### `@nlg` placement: a rule takes it on the line above, a name takes it trailing — and one leak
+### `@nlg` placement: a rule takes it on the line above or trailing its head, a name takes it trailing — and one leak
 
 Fuller treatment of what to put IN a herald — `%param%` slots, when a sentence replaces the
 implementation, and the three levers before you reach for one — is in
@@ -407,9 +415,11 @@ This section is only about WHERE it goes and what it will not do. Every claim be
 on 2026-09-21 on a build of `unstable` at `debf44d34`, which carries both `legalese/l4-ide#433`
 (attachment) and `#435` (field lists); the one-file probe is the measurement, not the merge log.
 The exception is the `GIVEN`-list paragraphs below, which were measured on 2026-10-02 at `e0366fd7f`.
+The paragraphs on trailing a herald were measured again on 2026-11-28 on the dev build, and where they differ from 2026-09-21 the later measurement is the one written.
 
-**A rule's herald goes on its own line, immediately above the definition.** That is the only
-placement that reaches a rule:
+**A rule's herald goes on its own line, immediately above the definition, or trails its head.**
+Those are the two placements that reach a rule.
+The own-line form:
 
 ```l4
 GIVEN n IS A NUMBER
@@ -420,16 +430,32 @@ DECIDE `כפול` IS n TIMES 2
 
 `l4 nlg --lang he` prints `שורה משלה עם 21`.
 
-**Trailing the definition line does NOT reach the rule**, and this is the trap, because it looks
-like it should. `DECIDE f n IS n TIMES 2 @nlg …`, the same with `MEANS`, and the head-line form
-with the body on the next line all render the rule as its bare name. What happens to the herald
-depends on what comes next, and only one of the two outcomes is loud:
+**Trailing the head reaches the rule too**, with the body on the next line, and it fills the `%param%` slots as the own-line form does.
+Measured 2026-11-28 on the dev build: ``DECIDE `is large` @nlg the claim of %amount% is large`` over `IF amount GREATER THAN 100` renders `the claim of 200 is large`, and ``DECIDE `doubled` @nlg twice %n%`` over `IS n TIMES 2` renders `twice 21`.
+The same holds when the head lists its inputs: `DECIDE f n @nlg twice %n%` over `IS n TIMES 2`, with no `GIVEN`, renders `twice 21` and `twice 5` for `#EVAL f 21` and `#EVAL f 5`, and so does ``DECIDE `doubled` n @nlg twice %n%`` under `GIVEN n IS A NUMBER`.
+An earlier version of this paragraph, measured 2026-09-21, had this head-line form rendering the bare name; on the dev build it does not.
+
+**Trailing the END of the definition line does NOT reach the rule**, and this is the trap, because it
+looks like it should. `DECIDE f n IS n TIMES 2 @nlg …` and the same with `MEANS` do not label the
+rule: the herald goes to whatever follows it. What happens to the herald depends on what
+comes next. These are the cases measured, not every possible follower, and only the first is loud:
 
 - nothing annotatable follows → `Not attached to any valid syntax node`, a parser diagnostic
-  pointing at the herald. Loud, and correct.
+  pointing at the herald. Loud, and correct. Measured 2026-11-28 on the dev build with another rule's `GIVEN` after a `DECIDE` and after a `MEANS`, and with the file ending after a `DECIDE`.
 - a `DECLARE` follows → the herald silently becomes THAT type's herald. Measured: a rule's
   trailing `@nlg SHOULD-BE-ON-RULE` rendered as `SHOULD-BE-ON-RULE where `x` is 1` on the
-  record declared beneath it, with a clean typecheck and no diagnostic. This is the silent one.
+  record declared beneath it, with a clean typecheck and no diagnostic. This is a silent one.
+- an `#EVAL` follows → the herald silently becomes the name's herald in that directive. Measured
+  2026-11-28: ``DECIDE `doubled` IS n TIMES 2 @nlg SHOULD-BE-ON-RULE`` followed by ``#EVAL `doubled` 21``
+  and ``#EVAL `doubled` 5`` prints `SHOULD-BE-ON-RULE with 21` and `` `doubled` with 5 ``, with a clean
+  typecheck and no diagnostic.
+  The tell is the slot: with `@nlg twice %n%` in that position the first directive prints ``twice `n` with 21``,
+  the input's name where a herald that had reached the rule prints its value, `twice 21`.
+- an `#ASSERT` follows → the same, silently. Measured 2026-11-28: ``DECIDE `doubled` IS n TIMES 2 @nlg SHOULD-BE-ON-RULE``
+  followed by ``#ASSERT `doubled` 2 EQUALS 4`` prints `SHOULD-BE-ON-RULE with 2 is equal to 4`, with a clean typecheck and no diagnostic.
+- another rule follows → the herald silently becomes THAT rule's herald. Measured 2026-11-28:
+  `DECIDE a IS 1 @nlg SHOULD-BE-ON-A`, then `DECIDE b IS 2`, then `#EVAL a` and `#EVAL b`, prints `` `a` `` (with its backticks) and then
+  `SHOULD-BE-ON-A`: the herald is on `b`, `a` is bare, and `l4 check` says `Check succeeded`.
 
 **"Immediately above the definition" means after `GIVETH`, not above `GIVEN` — and the trap here
 is silent, not loud.** `GIVEN`/`GIVETH` read like part of the rule, so `@nlg` above `GIVEN` looks
@@ -457,7 +483,8 @@ Move the herald to after `GIVETH`, and it attaches correctly regardless of what 
 
 **So do not trust `l4 check`'s silence as evidence a herald attached.** The only real check is `l4
 nlg` (or `l4 ast`) on a case that exercises the rule, confirming the herald's own text — not the
-bare fallback — comes out the other end.
+bare fallback — comes out the other end, with each `%param%` slot filled by its value (a herald
+captured by a later `#EVAL` prints its text with the slot left as the input's name).
 
 **A parameter's herald trails its own line.** `GIVEN n IS A NUMBER @nlg the count` describes `n`
 (`#433`; before it, the `NUMBER`). It describes the parameter, not the rule — a rule whose only
@@ -586,6 +613,41 @@ round-trips byte-identically. Two limits:
   is a mis-aligned ditto caret, which is the silent kind.
 
 ---
+
+---
+
+## `@nlg` placement and language
+
+`@nlg` describes the thing it sits with: **trailing a line, what is on that line; on a line of its own, what follows.**
+Under an input of a `GIVEN` or a field of a `DECLARE`, an annotation indented further than the keyword describes the input or field above it.
+A rule's own sentence goes trailing its head, or on its own line between the `GIVEN` block and the `DECIDE`.
+
+The failures, sorted by whether L4 tells you:
+
+| what you wrote                                                                          | what happens                                                           | does L4 say so? |
+| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------- |
+| the rule's sentence on its own line above the `GIVEN`, nothing before it                | the wording is dropped                                                 | yes, a warning  |
+| two wordings in the same language on one rule                                           | neither is used; the rule reads by its name                            | yes, a warning  |
+| an `@nlg` with no text, or only a tag                                                   | ignored                                                                | yes, a warning  |
+| two `@lang` lines that name different languages                                         | the last is used and the earlier has no effect                         | yes, a warning  |
+| the rule's sentence above the `GIVEN`, with an `IMPORT` or `§` heading above            | that `IMPORT` or heading takes it; the rule reads by its name          | no              |
+| the rule's sentence indented under the last input, even by one space                    | it becomes that input's gloss                                          | no              |
+| `10%and%20` in a wording, with an input called `and`                                    | `and` is replaced by the input's value: `10520`                        | no              |
+| `@nlg:the employee pays`, or `@nlg:en-route …`, on a rule with no other wording         | the first word is the language tag; the sentence reads `employee pays` | yes, a warning  |
+| `@nlg:the …` beside a wording in another language, on the same rule                     | `the` is taken for a language; the sentence loses its first word       | no              |
+| `% amount %` in a wording                                                               | it prints as plain text, and the slot is lost                          | yes, a warning  |
+| a field's gloss that repeats its owner: `@nlg the employee's date of birth` under `dob` | it reads "the employee's the employee's date of birth"                 | no              |
+| two wordings in one language on one field: `head [the first] IS AN a [an item]`         | neither is used; the field reads by its name                           | yes, a warning  |
+
+Write `\%` and `\]` for a literal percent sign or close bracket.
+A percent sign followed by a space is plain text, so `a 5% levy on %amount%` needs no escape.
+A pair with spaces inside it around one word, `% amount %`, is plain text too and draws a warning: write `%amount%`.
+
+**One wording per language.**
+`@nlg:he …` tags a wording with its language, each further wording goes on a continuation line, and `l4 nlg --lang he` or `l4 render --lang he` picks it.
+`@lang he` on a line of its own labels every untagged `@nlg` in the module.
+A module that declares nothing is English, and `@lang en` draws a hint that the line can go.
+Two `@lang` lines that name different languages draw a warning on the earlier one, and the last is used.
 
 ---
 
